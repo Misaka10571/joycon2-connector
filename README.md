@@ -62,7 +62,7 @@ Before running the app, make sure these are installed:
    - Pro Controller
    - NSO GameCube Controller
 3. Follow the on-screen steps — you'll be prompted to specify Left/Right for single Joy-Cons, or pair them one at a time for dual mode.
-4. Once connected, your controller appears on the **Dashboard** as a virtual DS4/Xbox gamepad, ready to use in any PC game.
+4. Once connected, your controller appears on the **Dashboard** as a virtual DS4 gamepad, ready to use in any supported PC or emulator game.
 
 ### Mouse Mode (Right Joy-Con 2 only)
 
