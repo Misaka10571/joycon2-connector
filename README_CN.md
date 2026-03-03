@@ -84,21 +84,19 @@
 
 1. 打开对应 VS 版本的 **x64 Native Tools 命令提示符**。
 
-2. 进入 `joycon2_connector` 目录并创建构建文件夹：
+2. 进入 `joycon2_connector` 目录：
    ```sh
-   cd joycon2_connector
-   mkdir build
-   cd build
+   cd ./joycon2_connector
    ```
 
 3. 生成 Visual Studio 项目文件：
    ```sh
-   cmake .. -G "Visual Studio 17 2022" -A x64
+   cmake -S . -B build -G "Visual Studio 17 2022" -A x64
    ```
 
 4. 以 Release 模式构建：
    ```sh
-   cmake --build . --config Release
+   cmake --build build --config Release
    ```
 
 5. 编译完成后，可执行文件位于：

@@ -89,21 +89,19 @@ Install the following via the **Visual Studio Installer**:
 
 1. Open the **x64 Native Tools Command Prompt** for your Visual Studio version.
 
-2. Navigate to the `joycon2_connector` directory and create a build folder:
+2. Navigate to the `joycon2_connector` directory:
    ```sh
    cd joycon2_connector
-   mkdir build
-   cd build
    ```
 
 3. Generate Visual Studio project files:
    ```sh
-   cmake .. -G "Visual Studio 17 2022" -A x64
+   cmake -S . -B build -G "Visual Studio 17 2022" -A x64
    ```
 
 4. Build in Release mode:
    ```sh
-   cmake --build . --config Release
+   cmake --build build --config Release
    ```
 
 5. The compiled executable will be at:
