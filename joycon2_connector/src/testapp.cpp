@@ -962,7 +962,7 @@ int main()
     InitializeViGEm();
 
     // Store all players to keep them alive
-    std::vector<SingleJoyConPlayer> singlePlayers;
+    std::vector<std::unique_ptr<SingleJoyConPlayer>> singlePlayers;
     std::vector<std::unique_ptr<DualJoyConPlayer>> dualPlayers;
     std::vector<ProControllerPlayer> proPlayers;
 
@@ -994,8 +994,8 @@ int main()
                 exit(1);
             }
 
-            singlePlayers.push_back({ cj, ds4_controller, config.joyconSide, config.joyconOrientation });
-            auto& player = singlePlayers.back();
+            singlePlayers.push_back(std::make_unique<SingleJoyConPlayer>(SingleJoyConPlayer{ cj, ds4_controller, config.joyconSide, config.joyconOrientation }));
+            auto& player = *singlePlayers.back();
 
             player.joycon.inputChar.ValueChanged([joyconSide = player.side, joyconOrientation = player.orientation, &player](GattCharacteristic const&, GattValueChangedEventArgs const& args)
                 {
@@ -1510,8 +1510,8 @@ int main()
     // Free single players controllers
     for (auto& sp : singlePlayers)
     {
-        vigem_target_remove(vigem_client, sp.ds4Controller);
-        vigem_target_free(sp.ds4Controller);
+        vigem_target_remove(vigem_client, sp->ds4Controller);
+        vigem_target_free(sp->ds4Controller);
     }
 
     // Free Pro Controllers

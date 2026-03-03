@@ -351,7 +351,7 @@ inline void RenderDashboard() {
 
         // Single Joy-Con players
         for (int i = 0; i < (int)pm.GetSinglePlayers().size(); ++i) {
-            auto& p = pm.GetSinglePlayers()[i];
+            auto& p = *pm.GetSinglePlayers()[i];
             ImGui::PushID(playerIndex * 100 + i);
             BeginCard(0, 0);
 
@@ -1032,8 +1032,8 @@ inline void RenderMouseSettings() {
 
     int currentMode = 0;
     for (auto& sp : PlayerManager::Instance().GetSinglePlayers()) {
-        if (sp.side == JoyConSide::Right) {
-            currentMode = sp.mouseMode;
+        if (sp->side == JoyConSide::Right) {
+            currentMode = sp->mouseMode;
             break;
         }
     }

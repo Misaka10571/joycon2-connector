@@ -312,7 +312,7 @@ public:
     }
 
     // Player data accessors for UI
-    std::vector<SingleJoyConPlayer>& GetSinglePlayers() { return singlePlayers; }
+    std::vector<std::unique_ptr<SingleJoyConPlayer>>& GetSinglePlayers() { return singlePlayers; }
     std::vector<std::unique_ptr<DualJoyConPlayer>>& GetDualPlayers() { return dualPlayers; }
     std::vector<ProControllerPlayer>& GetProPlayers() { return proPlayers; }
 
@@ -322,8 +322,8 @@ public:
         PVIGEM_TARGET ds4 = vigem.AllocDS4();
         if (!ds4 || !vigem.AddTarget(ds4)) return false;
 
-        singlePlayers.push_back(SingleJoyConPlayer(cj, ds4, side, orientation));
-        auto& player = singlePlayers.back();
+        singlePlayers.push_back(std::make_unique<SingleJoyConPlayer>(cj, ds4, side, orientation));
+        auto& player = *singlePlayers.back();
         player.bleAddress = cj.bleAddress;
         player.swapABXY = ConfigManager::Instance().GetDeviceSettings(cj.bleAddress).swapABXY;
         auto& mouseConfig = ConfigManager::Instance().config.mouseConfig;
@@ -700,8 +700,8 @@ public:
     void RemovePlayerByGlobalIndex(int globalIdx) {
         int idx = globalIdx;
         if (idx < (int)singlePlayers.size()) {
-            vigem_target_ds4_unregister_notification(singlePlayers[idx].ds4Controller);
-            ViGEmManager::Instance().RemoveTarget(singlePlayers[idx].ds4Controller);
+            vigem_target_ds4_unregister_notification(singlePlayers[idx]->ds4Controller);
+            ViGEmManager::Instance().RemoveTarget(singlePlayers[idx]->ds4Controller);
             singlePlayers.erase(singlePlayers.begin() + idx);
             return;
         }
@@ -736,8 +736,8 @@ public:
         }
         dualPlayers.clear();
         for (auto& sp : singlePlayers) {
-            vigem_target_ds4_unregister_notification(sp.ds4Controller);
-            ViGEmManager::Instance().RemoveTarget(sp.ds4Controller);
+            vigem_target_ds4_unregister_notification(sp->ds4Controller);
+            ViGEmManager::Instance().RemoveTarget(sp->ds4Controller);
         }
         singlePlayers.clear();
         for (auto& pp : proPlayers) {
@@ -751,7 +751,7 @@ public:
 
 private:
     PlayerManager() = default;
-    std::vector<SingleJoyConPlayer> singlePlayers;
+    std::vector<std::unique_ptr<SingleJoyConPlayer>> singlePlayers;
     std::vector<std::unique_ptr<DualJoyConPlayer>> dualPlayers;
     std::vector<ProControllerPlayer> proPlayers;
 
@@ -790,7 +790,7 @@ private:
                 auto now = std::chrono::steady_clock::now();
 
                 for (size_t i = 0; i < singlePlayers.size(); ++i) {
-                    auto& player = singlePlayers[i];
+                    auto& player = *singlePlayers[i];
                     auto& st = states[i];
 
                     if (!player.mouseInterpolActive.load(std::memory_order_relaxed))
