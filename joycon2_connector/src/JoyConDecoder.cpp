@@ -402,6 +402,8 @@ DS4_REPORT_EX GenerateProControllerReport(const std::vector<uint8_t>& buffer)
 
     report.Report.bTriggerL = (state & TRIGGER_LT_MASK) ? 255 : 0;
     report.Report.bTriggerR = (state & TRIGGER_RT_MASK) ? 255 : 0;
+    if (state & TRIGGER_LT_MASK)  report.Report.wButtons |= DS4_BUTTON_TRIGGER_LEFT;
+    if (state & TRIGGER_RT_MASK)  report.Report.wButtons |= DS4_BUTTON_TRIGGER_RIGHT;
 
     auto [lx, ly] = decode_pro_joystick(&buffer[10]);
     ly = -ly;
