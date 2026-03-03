@@ -31,3 +31,20 @@ uint32_t ExtractButtonState(const std::vector<uint8_t>& buffer);
 std::pair<int16_t, int16_t> GetRawOpticalMouse(const std::vector<uint8_t>& buffer);
 StickData DecodeJoystick(const std::vector<uint8_t>& buffer, JoyConSide side, JoyConOrientation orientation);
 MotionData DecodeMotion(const std::vector<uint8_t>& buffer);
+
+// Post-process a DS4 report to swap A⇄B (CROSS⇄CIRCLE) and X⇄Y (SQUARE⇄TRIANGLE)
+inline void ApplyABXYSwap(DS4_REPORT_EX& report) {
+    USHORT oldButtons = report.Report.wButtons;
+    // Read current state of the four face buttons
+    bool hasCross    = (oldButtons & DS4_BUTTON_CROSS) != 0;
+    bool hasCircle   = (oldButtons & DS4_BUTTON_CIRCLE) != 0;
+    bool hasSquare   = (oldButtons & DS4_BUTTON_SQUARE) != 0;
+    bool hasTriangle = (oldButtons & DS4_BUTTON_TRIANGLE) != 0;
+    // Clear all four
+    report.Report.wButtons &= ~(DS4_BUTTON_CROSS | DS4_BUTTON_CIRCLE | DS4_BUTTON_SQUARE | DS4_BUTTON_TRIANGLE);
+    // Re-set swapped: CROSS⇄CIRCLE, SQUARE⇄TRIANGLE
+    if (hasCross)    report.Report.wButtons |= DS4_BUTTON_CIRCLE;
+    if (hasCircle)   report.Report.wButtons |= DS4_BUTTON_CROSS;
+    if (hasSquare)   report.Report.wButtons |= DS4_BUTTON_TRIANGLE;
+    if (hasTriangle) report.Report.wButtons |= DS4_BUTTON_SQUARE;
+}

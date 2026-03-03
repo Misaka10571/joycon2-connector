@@ -106,6 +106,9 @@ struct SingleJoyConPlayer {
     PVIGEM_TARGET ds4Controller = nullptr;
     JoyConSide side;
     JoyConOrientation orientation;
+    // Per-device settings
+    bool swapABXY = false;
+    uint64_t bleAddress = 0;
     // Mouse State
     int mouseMode = 0;
     bool wasChatPressed = false;
@@ -179,6 +182,9 @@ struct DualJoyConPlayer {
     ConnectedJoyCon rightJoyCon;
     GyroSource gyroSource;
     PVIGEM_TARGET ds4Controller = nullptr;
+    // Per-device settings
+    bool swapABXY = false;
+    uint64_t bleAddress = 0;  // uses right JoyCon's BLE address
     std::atomic<bool> running{ false };
     std::thread updateThread;
     std::atomic<std::shared_ptr<std::vector<uint8_t>>> leftBufferAtomic{ std::make_shared<std::vector<uint8_t>>() };
@@ -193,6 +199,9 @@ struct ProControllerPlayer {
     PVIGEM_TARGET ds4Controller = nullptr;
     ControllerType type = ControllerType::ProController; // can also be NSOGCController
     std::unique_ptr<VibrationContext> vibCtx;
+    // Per-device settings
+    std::shared_ptr<std::atomic<bool>> swapABXYFlag = std::make_shared<std::atomic<bool>>(false);
+    uint64_t bleAddress = 0;
 };
 
 // Button mapping application
@@ -315,6 +324,8 @@ public:
 
         singlePlayers.push_back(SingleJoyConPlayer(cj, ds4, side, orientation));
         auto& player = singlePlayers.back();
+        player.bleAddress = cj.bleAddress;
+        player.swapABXY = ConfigManager::Instance().GetDeviceSettings(cj.bleAddress).swapABXY;
         auto& mouseConfig = ConfigManager::Instance().config.mouseConfig;
 
         // Register vibration callback
@@ -505,6 +516,7 @@ public:
             }
 
             DS4_REPORT_EX report = GenerateDS4Report(buffer, joyconSide, joyconOrientation);
+            if (playerPtr->swapABXY) ApplyABXYSwap(report);
             vigem_target_ds4_update_ex(ViGEmManager::Instance().GetClient(), playerPtr->ds4Controller, report);
         });
 
@@ -560,6 +572,8 @@ public:
         dp->rightJoyCon = pendingDualRight;
         dp->gyroSource = pendingDualGyro;
         dp->ds4Controller = ds4;
+        dp->bleAddress = pendingDualRight.bleAddress;
+        dp->swapABXY = ConfigManager::Instance().GetDeviceSettings(dp->bleAddress).swapABXY;
         dp->running.store(true);
 
         // Register vibration callback for dual JoyCon
@@ -609,6 +623,7 @@ public:
                 prevLeft = leftBuf;
                 prevRight = rightBuf;
                 DS4_REPORT_EX report = GenerateDualJoyConDS4Report(*leftBuf, *rightBuf, ptr->gyroSource);
+                if (ptr->swapABXY) ApplyABXYSwap(report);
                 vigem_target_ds4_update_ex(ViGEmManager::Instance().GetClient(), ptr->ds4Controller, report);
             }
         });
@@ -629,8 +644,12 @@ public:
             ConfigManager::Instance().Save();
         }
 
+        // Create shared swap flag so BLE callback lambda can access it safely
+        auto swapFlag = std::make_shared<std::atomic<bool>>(
+            ConfigManager::Instance().GetDeviceSettings(controller.bleAddress).swapABXY);
+
         if (type == ControllerType::ProController) {
-            controller.inputChar.ValueChanged([ds4](GattCharacteristic const&, GattValueChangedEventArgs const& args) mutable {
+            controller.inputChar.ValueChanged([ds4, swapFlag](GattCharacteristic const&, GattValueChangedEventArgs const& args) mutable {
                 thread_local bool prioritySet = false;
                 if (!prioritySet) { SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL); prioritySet = true; }
                 auto reader = DataReader::FromBuffer(args.CharacteristicValue());
@@ -638,17 +657,19 @@ public:
                 reader.ReadBytes(buffer);
                 DS4_REPORT_EX report = GenerateProControllerReport(buffer);
                 ApplyGLGRMappings(report, buffer);
+                if (swapFlag->load(std::memory_order_relaxed)) ApplyABXYSwap(report);
                 HandleSpecialProButtons(buffer);
                 vigem_target_ds4_update_ex(ViGEmManager::Instance().GetClient(), ds4, report);
             });
         } else {
-            controller.inputChar.ValueChanged([ds4](GattCharacteristic const&, GattValueChangedEventArgs const& args) mutable {
+            controller.inputChar.ValueChanged([ds4, swapFlag](GattCharacteristic const&, GattValueChangedEventArgs const& args) mutable {
                 thread_local bool prioritySet = false;
                 if (!prioritySet) { SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL); prioritySet = true; }
                 auto reader = DataReader::FromBuffer(args.CharacteristicValue());
                 std::vector<uint8_t> buffer(reader.UnconsumedBufferLength());
                 reader.ReadBytes(buffer);
                 DS4_REPORT_EX report = GenerateNSOGCReport(buffer);
+                if (swapFlag->load(std::memory_order_relaxed)) ApplyABXYSwap(report);
                 vigem_target_ds4_update_ex(ViGEmManager::Instance().GetClient(), ds4, report);
             });
         }
@@ -663,7 +684,7 @@ public:
             EmitSound(controller.writeChar);
         }
 
-        proPlayers.push_back({ controller, ds4, type, nullptr });
+        proPlayers.push_back({ controller, ds4, type, nullptr, swapFlag, controller.bleAddress });
 
         // Register vibration callback for pro/GC controller
         auto& pp = proPlayers.back();

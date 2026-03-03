@@ -45,6 +45,9 @@ inline const char* T(const char* key) {
         {"dash_gyro_both",      {{"en", "Both"},                     {"zh", u8"双侧"}}},
         {"dash_gyro_left",      {{"en", "Left"},                     {"zh", u8"左侧"}}},
         {"dash_gyro_right",     {{"en", "Right"},                    {"zh", u8"右侧"}}},
+        {"dash_settings",       {{"en", "Settings"},                 {"zh", u8"设置"}}},
+        {"dash_swap_abxy",      {{"en", u8"Swap A\u21c4B / X\u21c4Y"},         {"zh", u8"交换 A\u21c4B / X\u21c4Y"}}},
+        {"dash_swap_abxy_hint", {{"en", u8"Nintendo \u21c4 Xbox button layout"},{"zh", u8"任天堂 \u21c4 Xbox 按键布局"}}},
 
         // Controller Types
         {"type_single_joycon",  {{"en", "Single Joy-Con"},           {"zh", u8"单 Joy-Con"}}},

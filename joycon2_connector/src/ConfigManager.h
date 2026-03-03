@@ -42,11 +42,17 @@ struct VibrationConfig {
     float intensity = 1.0f;    // 0.0 - 1.0 scale factor
 };
 
+// Per-device settings (keyed by BLE address)
+struct DeviceSettings {
+    bool swapABXY = false;  // Swap A⇄B / X⇄Y button positions
+};
+
 struct AppConfig {
     ProControllerConfig proConfig;
     MouseConfig mouseConfig;
     VibrationConfig vibrationConfig;
     std::string language;  // "en", "zh", or "" (auto-detect)
+    std::map<uint64_t, DeviceSettings> deviceSettings;  // per-device settings, keyed by BLE address
 };
 
 // Button mapping string conversion helpers
@@ -123,7 +129,16 @@ inline std::string ConfigToJSON(const AppConfig& config) {
     oss << "    \"enabled\": " << (config.vibrationConfig.enabled ? "true" : "false") << ",\n";
     oss << "    \"intensity\": " << config.vibrationConfig.intensity << "\n";
     oss << "  },\n";
-    oss << "  \"language\": \"" << config.language << "\"\n";
+    oss << "  \"language\": \"" << config.language << "\",\n";
+    oss << "  \"deviceSettings\": [\n";
+    size_t dsIdx = 0;
+    for (const auto& [addr, ds] : config.deviceSettings) {
+        oss << "    { \"addr\": \"" << addr << "\", \"swapABXY\": " << (ds.swapABXY ? "true" : "false") << " }";
+        if (dsIdx + 1 < config.deviceSettings.size()) oss << ",";
+        oss << "\n";
+        dsIdx++;
+    }
+    oss << "  ]\n";
     oss << "}";
     return oss.str();
 }
@@ -226,6 +241,33 @@ inline bool JSONToConfig(const std::string& json, AppConfig& config) {
     // Parse language
     config.language = ExtractJsonString(json, "language");
 
+    // Parse per-device settings
+    config.deviceSettings.clear();
+    auto dsPos = json.find("\"deviceSettings\"");
+    if (dsPos != std::string::npos) {
+        auto dsArrStart = json.find('[', dsPos);
+        auto dsArrEnd = json.find(']', dsArrStart);
+        if (dsArrStart != std::string::npos && dsArrEnd != std::string::npos) {
+            std::string dsArrStr = json.substr(dsArrStart, dsArrEnd - dsArrStart + 1);
+            size_t dsObjPos = 0;
+            while ((dsObjPos = dsArrStr.find('{', dsObjPos)) != std::string::npos) {
+                auto dsObjEnd = dsArrStr.find('}', dsObjPos);
+                if (dsObjEnd == std::string::npos) break;
+                std::string dsObjStr = dsArrStr.substr(dsObjPos, dsObjEnd - dsObjPos + 1);
+                std::string addrStr = ExtractJsonString(dsObjStr, "addr");
+                if (!addrStr.empty()) {
+                    try {
+                        uint64_t addr = std::stoull(addrStr);
+                        DeviceSettings ds;
+                        ds.swapABXY = ExtractJsonBool(dsObjStr, "swapABXY", false);
+                        config.deviceSettings[addr] = ds;
+                    } catch (...) {}
+                }
+                dsObjPos = dsObjEnd + 1;
+            }
+        }
+    }
+
     return true;
 }
 
@@ -263,6 +305,17 @@ public:
             config.proConfig.layouts.push_back(defaultLayout);
             config.proConfig.activeLayoutIndex = 0;
         }
+    }
+
+    // Get per-device settings (creates default entry if not found)
+    DeviceSettings& GetDeviceSettings(uint64_t bleAddr) {
+        return config.deviceSettings[bleAddr];
+    }
+
+    // Update per-device settings and persist
+    void SaveDeviceSettings(uint64_t bleAddr, const DeviceSettings& settings) {
+        config.deviceSettings[bleAddr] = settings;
+        Save();
     }
 
 private:

@@ -28,6 +28,7 @@ struct ConnectedJoyCon {
     BluetoothLEDevice device = nullptr;
     GattCharacteristic inputChar = nullptr;
     GattCharacteristic writeChar = nullptr;
+    uint64_t bleAddress = 0;
 };
 
 enum class ScanState { Idle, Scanning, Found, Error, Timeout };
@@ -142,6 +143,7 @@ private:
         }
 
         cj.device = device;
+        cj.bleAddress = device.BluetoothAddress();
 
         // Check cancel before GATT discovery
         if (cancelScan.load()) {

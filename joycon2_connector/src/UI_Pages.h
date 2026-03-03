@@ -133,6 +133,23 @@ inline void StatusChip(const char* label, ImVec4 bg, ImVec4 textColor) {
     ImGui::Dummy(ImVec2(chipW, chipH));
 }
 
+// Helper: Icon button (gear/settings) - MD3 tonal icon button
+inline bool IconButton(const char* id, float size = 0) {
+    if (size <= 0) size = S(40);
+    ImGui::PushID(id);
+    ImGui::PushStyleColor(ImGuiCol_Button, UITheme::ButtonSecondary);
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, UITheme::ButtonSecondaryHov);
+    ImGui::PushStyleColor(ImGuiCol_ButtonActive, UITheme::SurfaceDim);
+    ImGui::PushStyleColor(ImGuiCol_Text, UITheme::TextPrimary);
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(0, 0));
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, S(12));
+    bool result = ImGui::Button(u8"\u2699", ImVec2(size, size));  // ⚙ gear unicode
+    ImGui::PopStyleVar(2);
+    ImGui::PopStyleColor(4);
+    ImGui::PopID();
+    return result;
+}
+
 // Helper: Spinner animation
 inline void Spinner(const char* label, float radius, float thickness, ImU32 color) {
     ImGuiWindow* window = ImGui::GetCurrentWindow();
@@ -294,7 +311,7 @@ inline void DrawControllerIcon(ControllerType type, ImVec2 pos, float scale, ImU
 // =============================================================
 inline void RenderDashboard() {
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(S(24), S(24)));
-    ImGui::BeginChild("DashboardContent", ImVec2(0, 0), ImGuiChildFlags_None);
+    ImGui::BeginChild("DashboardContent", ImVec2(-S(8), 0), ImGuiChildFlags_None);
     ImGui::PopStyleVar();
     ImGui::SetCursorPos(ImVec2(S(24), S(16)));
 
@@ -357,12 +374,40 @@ inline void RenderDashboard() {
             }
             ImGui::EndGroup();
 
-            ImGui::SameLine(ImGui::GetContentRegionAvail().x - S(80));
+            // Right-aligned buttons: settings (for right upright only) + disconnect
+            bool showSettings = (p.side == JoyConSide::Right && p.orientation == JoyConOrientation::Upright);
+            float buttonsWidth = S(80) + (showSettings ? S(48) : 0);
+            ImGui::SameLine(ImGui::GetContentRegionAvail().x - buttonsWidth);
+            if (showSettings) {
+                if (IconButton("singleSettings")) {
+                    ImGui::OpenPopup("SingleJoyConSettings");
+                }
+                ImGui::SameLine();
+            }
             if (DangerButton(T("dash_disconnect"))) {
                 pm.RemovePlayerByGlobalIndex(i);
                 ImGui::PopID();
                 EndCard();
                 break;
+            }
+
+            // Settings popup
+            if (showSettings) {
+                ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(S(16), S(12)));
+                ImGui::PushStyleVar(ImGuiStyleVar_PopupRounding, S(12));
+                if (ImGui::BeginPopup("SingleJoyConSettings")) {
+                    ImGui::TextColored(UITheme::TextSecondary, "%s", T("dash_settings"));
+                    ImGui::Spacing();
+                    bool swap = p.swapABXY;
+                    if (ImGui::Checkbox(T("dash_swap_abxy"), &swap)) {
+                        p.swapABXY = swap;
+                        ConfigManager::Instance().GetDeviceSettings(p.bleAddress).swapABXY = swap;
+                        ConfigManager::Instance().Save();
+                    }
+                    ImGui::TextColored(UITheme::TextTertiary, "%s", T("dash_swap_abxy_hint"));
+                    ImGui::EndPopup();
+                }
+                ImGui::PopStyleVar(2);
             }
 
             EndCard();
@@ -390,7 +435,12 @@ inline void RenderDashboard() {
             ImGui::TextColored(UITheme::TextSecondary, "%s  |  %s: %s", T("dash_mapping"), T("dash_gyro_source"), gyroName);
             ImGui::EndGroup();
 
-            ImGui::SameLine(ImGui::GetContentRegionAvail().x - S(80));
+            float dualButtonsWidth = S(80) + S(48);
+            ImGui::SameLine(ImGui::GetContentRegionAvail().x - dualButtonsWidth);
+            if (IconButton("dualSettings")) {
+                ImGui::OpenPopup("DualJoyConSettings");
+            }
+            ImGui::SameLine();
             int globalIdx = (int)pm.GetSinglePlayers().size() + i;
             if (DangerButton(T("dash_disconnect"))) {
                 pm.RemovePlayerByGlobalIndex(globalIdx);
@@ -398,6 +448,23 @@ inline void RenderDashboard() {
                 EndCard();
                 break;
             }
+
+            // Settings popup
+            ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(S(16), S(12)));
+            ImGui::PushStyleVar(ImGuiStyleVar_PopupRounding, S(12));
+            if (ImGui::BeginPopup("DualJoyConSettings")) {
+                ImGui::TextColored(UITheme::TextSecondary, "%s", T("dash_settings"));
+                ImGui::Spacing();
+                bool swap = p->swapABXY;
+                if (ImGui::Checkbox(T("dash_swap_abxy"), &swap)) {
+                    p->swapABXY = swap;
+                    ConfigManager::Instance().GetDeviceSettings(p->bleAddress).swapABXY = swap;
+                    ConfigManager::Instance().Save();
+                }
+                ImGui::TextColored(UITheme::TextTertiary, "%s", T("dash_swap_abxy_hint"));
+                ImGui::EndPopup();
+            }
+            ImGui::PopStyleVar(2);
 
             EndCard();
             ImGui::PopID();
@@ -432,7 +499,12 @@ inline void RenderDashboard() {
             }
             ImGui::EndGroup();
 
-            ImGui::SameLine(ImGui::GetContentRegionAvail().x - S(80));
+            float proButtonsWidth = S(80) + S(48);
+            ImGui::SameLine(ImGui::GetContentRegionAvail().x - proButtonsWidth);
+            if (IconButton("proSettings")) {
+                ImGui::OpenPopup("ProSettings");
+            }
+            ImGui::SameLine();
             int globalIdx = (int)pm.GetSinglePlayers().size() + (int)pm.GetDualPlayers().size() + i;
             if (DangerButton(T("dash_disconnect"))) {
                 pm.RemovePlayerByGlobalIndex(globalIdx);
@@ -440,6 +512,23 @@ inline void RenderDashboard() {
                 EndCard();
                 break;
             }
+
+            // Settings popup
+            ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(S(16), S(12)));
+            ImGui::PushStyleVar(ImGuiStyleVar_PopupRounding, S(12));
+            if (ImGui::BeginPopup("ProSettings")) {
+                ImGui::TextColored(UITheme::TextSecondary, "%s", T("dash_settings"));
+                ImGui::Spacing();
+                bool swap = p.swapABXYFlag->load(std::memory_order_relaxed);
+                if (ImGui::Checkbox(T("dash_swap_abxy"), &swap)) {
+                    p.swapABXYFlag->store(swap, std::memory_order_relaxed);
+                    ConfigManager::Instance().GetDeviceSettings(p.bleAddress).swapABXY = swap;
+                    ConfigManager::Instance().Save();
+                }
+                ImGui::TextColored(UITheme::TextTertiary, "%s", T("dash_swap_abxy_hint"));
+                ImGui::EndPopup();
+            }
+            ImGui::PopStyleVar(2);
 
             EndCard();
             ImGui::PopID();
@@ -456,7 +545,7 @@ inline void RenderDashboard() {
 // =============================================================
 inline void RenderAddDevice(int& activePage) {
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(S(24), S(24)));
-    ImGui::BeginChild("AddDeviceContent", ImVec2(0, 0), ImGuiChildFlags_None);
+    ImGui::BeginChild("AddDeviceContent", ImVec2(-S(8), 0), ImGuiChildFlags_None);
     ImGui::PopStyleVar();
     ImGui::SetCursorPos(ImVec2(S(24), S(16)));
 
