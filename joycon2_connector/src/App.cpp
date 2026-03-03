@@ -432,11 +432,12 @@ void LoadFonts(ImGuiIO& io, float dpiScale) {
     static const ImWchar ranges[] = {
         0x0020, 0x00FF, // Basic Latin
         0x2000, 0x206F, // General Punctuation
+        0x2190, 0x21FF, // Arrows (contains ⇄ U+21C4)
         0x3000, 0x30FF, // CJK Symbols, Hiragana, Katakana
         0x31F0, 0x31FF, // Katakana Extension
         0x4E00, 0x9FFF, // CJK Unified Ideographs
         0xFF00, 0xFFEF, // Halfwidth and Fullwidth Forms
-        0x2600, 0x26FF, // Miscellaneous Symbols
+        0x2600, 0x26FF, // Miscellaneous Symbols (contains ⚙ U+2699)
         0x2700, 0x27BF, // Dingbats
         0xFE00, 0xFE0F, // Variation Selectors
         0,
@@ -445,14 +446,25 @@ void LoadFonts(ImGuiIO& io, float dpiScale) {
     static const ImWchar latinRanges[] = {
         0x0020, 0x00FF, // Basic Latin
         0x2000, 0x206F, // General Punctuation
-        0x2600, 0x26FF, // Miscellaneous Symbols
+        0x2190, 0x21FF, // Arrows (contains ⇄ U+21C4)
+        0x2600, 0x26FF, // Miscellaneous Symbols (contains ⚙ U+2699)
         0x2700, 0x27BF, // Dingbats
         0xFE00, 0xFE0F, // Variation Selectors
+        0,
+    };
+    // Symbol ranges for Segoe UI Symbol fallback (⚙ ⇄ etc.)
+    static const ImWchar symbolRanges[] = {
+        0x2190, 0x21FF, // Arrows
+        0x2600, 0x26FF, // Miscellaneous Symbols
+        0x2700, 0x27BF, // Dingbats
         0,
     };
 
     const float sizes[] = { 16.0f, 22.0f };
     bool fontLoaded = false;
+
+    // Resolve Segoe UI Symbol path once for symbol fallback
+    std::string symPath = GetSystemFontPath("seguisym.ttf");
 
     // Strategy 1: Microsoft YaHei covers both Latin and CJK in one font
     std::string msyhPath = GetSystemFontPath("msyh.ttc");
@@ -462,6 +474,14 @@ void LoadFonts(ImGuiIO& io, float dpiScale) {
             cfg.OversampleH = 2;
             cfg.OversampleV = 1;
             io.Fonts->AddFontFromFileTTF(msyhPath.c_str(), sz * dpiScale, &cfg, ranges);
+            // Merge Segoe UI Symbol for reliable symbol coverage (⚙ ⇄)
+            if (!symPath.empty()) {
+                ImFontConfig symCfg;
+                symCfg.MergeMode = true;
+                symCfg.OversampleH = 2;
+                symCfg.OversampleV = 1;
+                io.Fonts->AddFontFromFileTTF(symPath.c_str(), sz * dpiScale, &symCfg, symbolRanges);
+            }
         }
         fontLoaded = true;
     }
@@ -489,6 +509,14 @@ void LoadFonts(ImGuiIO& io, float dpiScale) {
                     mergeCfg.OversampleV = 1;
                     io.Fonts->AddFontFromFileTTF(cjkPath.c_str(), sz * dpiScale, &mergeCfg, ranges);
                 }
+                // Merge Segoe UI Symbol for reliable symbol coverage (⚙ ⇄)
+                if (!symPath.empty()) {
+                    ImFontConfig symCfg;
+                    symCfg.MergeMode = true;
+                    symCfg.OversampleH = 2;
+                    symCfg.OversampleV = 1;
+                    io.Fonts->AddFontFromFileTTF(symPath.c_str(), sz * dpiScale, &symCfg, symbolRanges);
+                }
             }
             fontLoaded = true;
         }
@@ -507,6 +535,14 @@ void LoadFonts(ImGuiIO& io, float dpiScale) {
                 cfg.OversampleH = 2;
                 cfg.OversampleV = 1;
                 io.Fonts->AddFontFromFileTTF(cjkPath.c_str(), sz * dpiScale, &cfg, ranges);
+                // Merge Segoe UI Symbol for reliable symbol coverage (⚙ ⇄)
+                if (!symPath.empty()) {
+                    ImFontConfig symCfg;
+                    symCfg.MergeMode = true;
+                    symCfg.OversampleH = 2;
+                    symCfg.OversampleV = 1;
+                    io.Fonts->AddFontFromFileTTF(symPath.c_str(), sz * dpiScale, &symCfg, symbolRanges);
+                }
             }
             fontLoaded = true;
         }
