@@ -4,10 +4,10 @@
 
 # JoyCon2 Connector
 
-> [joycon2cpp](https://github.com/original/joycon2cpp) 的  Fork 版本 —— 重写了完整的 GUI 界面，优化光学鼠标支持，让 Switch 2 手柄在  PC 上直接可用。
+> [joycon2cpp](https://github.com/TheFrano/joycon2cpp) 的  Fork 版本 —— 重写了完整的 GUI 界面，优化光学鼠标支持，让 Switch 2 手柄在  PC 上直接可用。
 > 
-> ![Dashboard](https://s41.ax1x.com/2026/03/01/peSqb0P.png)
-
+> ![Dashboard](https://s41.ax1x.com/2026/03/01/peSqb0P.png)    
+*点个 star 谢谢喵，爱你喵*
 ---
 
 ## 功能简介

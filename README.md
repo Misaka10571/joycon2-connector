@@ -4,7 +4,7 @@
 
 # JoyCon2 Connector
 
-> A fork of [joycon2cpp](https://github.com/original/joycon2cpp) — with a fully rewritten GUI, improved optical mouse support, and seamless Switch 2 controller support on PC.
+> A fork of [joycon2cpp](https://github.com/TheFrano/joycon2cpp) — with a fully rewritten GUI, improved optical mouse support, and seamless Switch 2 controller support on PC.
 
 ![Dashboard](https://s41.ax1x.com/2026/03/01/peSqo6A.png)
 
@@ -62,7 +62,7 @@ Before running the app, make sure these are installed:
    - Pro Controller
    - NSO GameCube Controller
 3. Follow the on-screen steps — you'll be prompted to specify Left/Right for single Joy-Cons, or pair them one at a time for dual mode.
-4. Once connected, your controller appears on the **Dashboard** as a virtual DS4/Xbox gamepad, ready to use in any PC game.
+4. Once connected, your controller appears on the **Dashboard** as a virtual DS4 gamepad, ready to use in any supported PC or emulator game.
 
 ### Mouse Mode (Right Joy-Con 2 only)
 
