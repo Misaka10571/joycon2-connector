@@ -547,8 +547,8 @@ XUSB_REPORT GenerateXUSBReport(const std::vector<uint8_t>& buffer, JoyConSide si
         if (state & BUTTON_STICK_MASK_LEFT)  report.wButtons |= XUSB_GAMEPAD_LEFT_THUMB;
     } else {
         if (state & BUTTON_A_MASK_RIGHT)     report.wButtons |= XUSB_GAMEPAD_B;
-        if (state & BUTTON_B_MASK_RIGHT)     report.wButtons |= XUSB_GAMEPAD_A;
-        if (state & BUTTON_X_MASK_RIGHT)     report.wButtons |= XUSB_GAMEPAD_Y;
+        if (state & BUTTON_B_MASK_RIGHT)     report.wButtons |= XUSB_GAMEPAD_Y;
+        if (state & BUTTON_X_MASK_RIGHT)     report.wButtons |= XUSB_GAMEPAD_A;
         if (state & BUTTON_Y_MASK_RIGHT)     report.wButtons |= XUSB_GAMEPAD_X;
         if (state & BUTTON_PLUS_MASK_RIGHT)  report.wButtons |= XUSB_GAMEPAD_START;
         if (state & BUTTON_R_MASK_RIGHT)     report.wButtons |= XUSB_GAMEPAD_RIGHT_SHOULDER;
