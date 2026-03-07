@@ -91,6 +91,18 @@
 
     "settings_minimize_to_tray": "关闭时最小化到托盘",
     "settings_minimize_to_tray_hint": "关闭窗口时最小化到系统托盘而非退出程序",
+
+    "settings_auto_check_update": "启动时自动检查更新",
+    "settings_auto_check_update_hint": "程序启动时自动检查是否有新版本",
+    "settings_check_update": "检查更新",
+    "update_checking": "正在检查更新...",
+    "update_available_title": "发现新版本",
+    "update_available_msg": "新版本 %s 已发布（当前版本：%s），是否前往下载页面？",
+    "update_up_to_date": "当前已是最新版本。",
+    "update_error": "检查更新失败，请检查网络连接。",
+    "update_go_to_download": "前往下载",
+    "update_later": "稍后再说",
+
     "tray_show": "显示主窗口",
     "tray_no_device": "暂无已连接的手柄",
     "tray_disconnect": "断开连接",

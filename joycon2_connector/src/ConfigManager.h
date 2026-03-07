@@ -55,6 +55,7 @@ struct AppConfig {
     std::string language;  // "en", "zh", or "" (auto-detect)
     std::map<uint64_t, DeviceSettings> deviceSettings;  // per-device settings, keyed by BLE address
     bool minimizeToTray = false;  // Minimize to system tray on close instead of exiting
+    bool autoCheckUpdate = false;  // Auto check for updates on startup (default off)
 };
 
 // Button mapping string conversion helpers
@@ -133,6 +134,7 @@ inline std::string ConfigToJSON(const AppConfig& config) {
     oss << "  },\n";
     oss << "  \"language\": \"" << config.language << "\",\n";
     oss << "  \"minimizeToTray\": " << (config.minimizeToTray ? "true" : "false") << ",\n";
+    oss << "  \"autoCheckUpdate\": " << (config.autoCheckUpdate ? "true" : "false") << ",\n";
     oss << "  \"deviceSettings\": [\n";
     size_t dsIdx = 0;
     for (const auto& [addr, ds] : config.deviceSettings) {
@@ -249,6 +251,9 @@ inline bool JSONToConfig(const std::string& json, AppConfig& config) {
 
     // Parse minimizeToTray
     config.minimizeToTray = ExtractJsonBool(json, "minimizeToTray", false);
+
+    // Parse autoCheckUpdate
+    config.autoCheckUpdate = ExtractJsonBool(json, "autoCheckUpdate", false);
 
     // Parse per-device settings
     config.deviceSettings.clear();

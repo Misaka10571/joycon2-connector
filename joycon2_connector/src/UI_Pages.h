@@ -7,6 +7,7 @@
 #include "DeviceManager.h"
 #include "ViGEmManager.h"
 #include "UI_Theme.h"
+#include "UpdateChecker.h"
 #include "version.h"
 #include <string>
 #include <cmath>
@@ -1132,6 +1133,53 @@ inline void RenderSettings() {
 
     ImGui::Spacing(); ImGui::Spacing();
 
+    // ---- Update checker card ----
+    BeginCard();
+
+    bool& autoUpdate = ConfigManager::Instance().config.autoCheckUpdate;
+    if (ImGui::Checkbox(T("settings_auto_check_update"), &autoUpdate)) {
+        ConfigManager::Instance().Save();
+    }
+    ImGui::TextColored(UITheme::TextTertiary, "%s", T("settings_auto_check_update_hint"));
+    ImGui::Spacing();
+
+    {
+        auto updateState = UpdateChecker::Instance().GetState();
+        bool isChecking = (updateState == UpdateState::Checking);
+
+        if (isChecking) {
+            // Show disabled-style button while checking
+            ImGui::PushStyleColor(ImGuiCol_Button, UITheme::SurfaceDim);
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, UITheme::SurfaceDim);
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive, UITheme::SurfaceDim);
+            ImGui::PushStyleColor(ImGuiCol_Text, UITheme::TextTertiary);
+            ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(S(24), S(10)));
+            ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, S(20));
+            ImGui::Button(T("update_checking"), MD3ButtonSize());
+            ImGui::PopStyleVar(2);
+            ImGui::PopStyleColor(4);
+        } else {
+            if (SecondaryButton(T("settings_check_update"))) {
+                UpdateChecker::Instance().CheckForUpdate();
+            }
+        }
+
+        // Status text feedback (only for manual checks)
+        if (updateState == UpdateState::UpToDate) {
+            ImGui::SameLine();
+            ImGui::SetCursorPosY(ImGui::GetCursorPosY() + S(10));
+            ImGui::TextColored(UITheme::Success, "%s", T("update_up_to_date"));
+        } else if (updateState == UpdateState::Error) {
+            ImGui::SameLine();
+            ImGui::SetCursorPosY(ImGui::GetCursorPosY() + S(10));
+            ImGui::TextColored(UITheme::Error, "%s", T("update_error"));
+        }
+    }
+
+    EndCard();
+
+    ImGui::Spacing(); ImGui::Spacing();
+
     // ---- About card ----
     BeginCard();
 
@@ -1147,6 +1195,67 @@ inline void RenderSettings() {
     ImGui::TextColored(UITheme::TextTertiary, "%s", T("settings_about_desc"));
 
     EndCard();
+
+    // ---- Update available popup ----
+    static bool updatePopupOpen = false;
+    if (UpdateChecker::Instance().ShouldShowPopup()) {
+        UpdateChecker::Instance().PopupShown();
+        updatePopupOpen = true;
+        ImGui::OpenPopup("##UpdatePopup");
+    }
+
+    // Center the popup
+    ImVec2 center = ImGui::GetMainViewport()->GetCenter();
+    ImGui::SetNextWindowPos(center, ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+    ImGui::SetNextWindowSize(ImVec2(S(420), 0));
+
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(S(24), S(20)));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, S(16));
+    ImGui::PushStyleColor(ImGuiCol_PopupBg, UITheme::SurfaceCard);
+
+    if (ImGui::BeginPopupModal("##UpdatePopup", &updatePopupOpen,
+        ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_AlwaysAutoResize))
+    {
+        // Title
+        ImGui::PushFont(ImGui::GetIO().Fonts->Fonts.Size > 1 ? ImGui::GetIO().Fonts->Fonts[1] : nullptr);
+        ImGui::TextColored(UITheme::Primary, "%s", T("update_available_title"));
+        if (ImGui::GetIO().Fonts->Fonts.Size > 1) ImGui::PopFont();
+
+        ImGui::Spacing(); ImGui::Spacing();
+
+        // Message with version info
+        char msgBuf[256];
+        snprintf(msgBuf, sizeof(msgBuf), T("update_available_msg"),
+            UpdateChecker::Instance().GetLatestVersion().c_str(), APP_VERSION);
+        ImGui::TextWrapped("%s", msgBuf);
+
+        ImGui::Spacing(); ImGui::Spacing(); ImGui::Spacing();
+
+        // Buttons row — right-aligned
+        float btnWidth1 = ImGui::CalcTextSize(T("update_go_to_download")).x + S(48);
+        float btnWidth2 = ImGui::CalcTextSize(T("update_later")).x + S(48);
+        float totalWidth = btnWidth1 + btnWidth2 + S(12);
+        float availWidth = ImGui::GetContentRegionAvail().x;
+        if (totalWidth < availWidth) {
+            ImGui::SetCursorPosX(ImGui::GetCursorPosX() + availWidth - totalWidth);
+        }
+
+        if (SecondaryButton(T("update_later"))) {
+            updatePopupOpen = false;
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::SameLine(0, S(12));
+        if (PrimaryButton(T("update_go_to_download"))) {
+            UpdateChecker::Instance().OpenReleasePage();
+            updatePopupOpen = false;
+            ImGui::CloseCurrentPopup();
+        }
+
+        ImGui::EndPopup();
+    }
+
+    ImGui::PopStyleColor();
+    ImGui::PopStyleVar(2);
 
     ImGui::EndChild();
 }

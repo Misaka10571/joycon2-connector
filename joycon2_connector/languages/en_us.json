@@ -91,6 +91,18 @@
 
     "settings_minimize_to_tray": "Minimize to tray on close",
     "settings_minimize_to_tray_hint": "Minimize to system tray instead of exiting when closing the window",
+
+    "settings_auto_check_update": "Auto check for updates on startup",
+    "settings_auto_check_update_hint": "Automatically check for new versions when the program starts",
+    "settings_check_update": "Check for Updates",
+    "update_checking": "Checking for updates...",
+    "update_available_title": "Update Available",
+    "update_available_msg": "A new version %s is available (current: %s). Would you like to visit the download page?",
+    "update_up_to_date": "You are using the latest version.",
+    "update_error": "Failed to check for updates. Please check your network connection.",
+    "update_go_to_download": "Go to Download",
+    "update_later": "Later",
+
     "tray_show": "Show Main Window",
     "tray_no_device": "No controllers connected",
     "tray_disconnect": "Disconnect",

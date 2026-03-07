@@ -23,6 +23,7 @@
 #include "ViGEmManager.h"
 #include "PlayerManager.h"
 #include "i18n.h"
+#include "UpdateChecker.h"
 #include "app_icon.h"
 #include "version.h"
 
@@ -775,6 +776,11 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
             lang = detected;
             ConfigManager::Instance().Save();
         }
+    }
+
+    // Auto check for updates on startup (non-blocking background thread)
+    if (ConfigManager::Instance().config.autoCheckUpdate) {
+        UpdateChecker::Instance().CheckForUpdateSilent();
     }
 
     // Clear color
