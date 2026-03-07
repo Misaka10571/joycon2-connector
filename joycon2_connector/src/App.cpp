@@ -6,6 +6,7 @@
 #include <d3d11.h>
 #include <dwmapi.h>
 #include <mmsystem.h>
+#include <shellapi.h>
 #include <tchar.h>
 #include <string>
 #include <algorithm>
@@ -44,6 +45,15 @@ static bool  g_fontRebuildNeeded = false;
 static float g_pendingDpiScale = 1.0f;
 static const float TITLE_BAR_HEIGHT_DP = 40.0f; // logical dp
 
+// System tray icon
+#define WM_TRAYICON      (WM_USER + 1)
+#define IDM_TRAY_SHOW    2001
+#define IDM_TRAY_EXIT    2002
+#define IDM_TRAY_DISCONNECT_BASE 3000
+static NOTIFYICONDATAW g_nid = {};
+static bool g_trayIconCreated = false;
+static bool g_forceQuit = false;  // true when user clicks Exit from tray menu
+
 // Helper: build full path to a Windows system font file and check existence
 static std::string GetSystemFontPath(const char* fontFile) {
     char winDir[MAX_PATH];
@@ -58,6 +68,122 @@ static std::string GetSystemFontPath(const char* fontFile) {
 bool CreateDeviceD3D(HWND hWnd);
 void CleanupDeviceD3D();
 void CreateRenderTarget();
+
+// ---------- UTF-8 to Wide string helper ----------
+static std::wstring Utf8ToWide(const char* utf8) {
+    if (!utf8 || !utf8[0]) return L"";
+    int len = MultiByteToWideChar(CP_UTF8, 0, utf8, -1, nullptr, 0);
+    if (len <= 0) return L"";
+    std::wstring result(len - 1, L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, utf8, -1, &result[0], len);
+    return result;
+}
+
+// ---------- System Tray Icon ----------
+static void CreateTrayIcon(HWND hwnd) {
+    if (g_trayIconCreated) return;
+    ZeroMemory(&g_nid, sizeof(g_nid));
+    g_nid.cbSize = sizeof(NOTIFYICONDATAW);
+    g_nid.hWnd = hwnd;
+    g_nid.uID = 1;
+    g_nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
+    g_nid.uCallbackMessage = WM_TRAYICON;
+    g_nid.hIcon = LoadIcon(GetModuleHandle(NULL), MAKEINTRESOURCE(101));
+    wcscpy_s(g_nid.szTip, L"JoyCon2 Connector");
+    Shell_NotifyIconW(NIM_ADD, &g_nid);
+    g_trayIconCreated = true;
+}
+
+static void RemoveTrayIcon() {
+    if (!g_trayIconCreated) return;
+    Shell_NotifyIconW(NIM_DELETE, &g_nid);
+    g_trayIconCreated = false;
+}
+
+static void RestoreFromTray(HWND hwnd) {
+    ShowWindow(hwnd, SW_SHOW);
+    SetForegroundWindow(hwnd);
+    // If window was minimized before hiding, restore it
+    if (IsIconic(hwnd)) ShowWindow(hwnd, SW_RESTORE);
+}
+
+static void ShowTrayMenu(HWND hwnd) {
+    POINT pt;
+    GetCursorPos(&pt);
+
+    HMENU hMenu = CreatePopupMenu();
+    if (!hMenu) return;
+
+    // 1. Show Main Window
+    std::wstring showText = Utf8ToWide(T("tray_show"));
+    AppendMenuW(hMenu, MF_STRING, IDM_TRAY_SHOW, showText.c_str());
+
+    AppendMenuW(hMenu, MF_SEPARATOR, 0, nullptr);
+
+    // 2. Connected controllers list
+    auto& pm = PlayerManager::Instance();
+    int globalIdx = 0;
+    bool hasAnyPlayer = false;
+
+    // Single Joy-Con players
+    for (int i = 0; i < (int)pm.GetSinglePlayers().size(); ++i) {
+        hasAnyPlayer = true;
+        std::string label = std::string(T("dash_player")) + " " + std::to_string(globalIdx + 1) + " - " + T("type_single_joycon");
+        std::wstring wLabel = Utf8ToWide(label.c_str());
+
+        HMENU hSub = CreatePopupMenu();
+        std::wstring dcText = Utf8ToWide(T("tray_disconnect"));
+        AppendMenuW(hSub, MF_STRING, IDM_TRAY_DISCONNECT_BASE + globalIdx, dcText.c_str());
+        AppendMenuW(hMenu, MF_STRING | MF_POPUP, (UINT_PTR)hSub, wLabel.c_str());
+        globalIdx++;
+    }
+
+    // Dual Joy-Con players
+    for (int i = 0; i < (int)pm.GetDualPlayers().size(); ++i) {
+        hasAnyPlayer = true;
+        int singleCount = (int)pm.GetSinglePlayers().size();
+        std::string label = std::string(T("dash_player")) + " " + std::to_string(globalIdx + 1) + " - " + T("type_dual_joycon");
+        std::wstring wLabel = Utf8ToWide(label.c_str());
+
+        HMENU hSub = CreatePopupMenu();
+        std::wstring dcText = Utf8ToWide(T("tray_disconnect"));
+        AppendMenuW(hSub, MF_STRING, IDM_TRAY_DISCONNECT_BASE + globalIdx, dcText.c_str());
+        AppendMenuW(hMenu, MF_STRING | MF_POPUP, (UINT_PTR)hSub, wLabel.c_str());
+        globalIdx++;
+    }
+
+    // Pro / NSO GC players
+    for (int i = 0; i < (int)pm.GetProPlayers().size(); ++i) {
+        hasAnyPlayer = true;
+        const auto& pp = pm.GetProPlayers()[i];
+        const char* typeName = (pp.type == ControllerType::NSOGCController) ? T("type_nso_gc") : T("type_pro");
+        std::string label = std::string(T("dash_player")) + " " + std::to_string(globalIdx + 1) + " - " + typeName;
+        std::wstring wLabel = Utf8ToWide(label.c_str());
+
+        HMENU hSub = CreatePopupMenu();
+        std::wstring dcText = Utf8ToWide(T("tray_disconnect"));
+        AppendMenuW(hSub, MF_STRING, IDM_TRAY_DISCONNECT_BASE + globalIdx, dcText.c_str());
+        AppendMenuW(hMenu, MF_STRING | MF_POPUP, (UINT_PTR)hSub, wLabel.c_str());
+        globalIdx++;
+    }
+
+    if (!hasAnyPlayer) {
+        std::wstring noDevText = Utf8ToWide(T("tray_no_device"));
+        AppendMenuW(hMenu, MF_STRING | MF_GRAYED, 0, noDevText.c_str());
+    }
+
+    AppendMenuW(hMenu, MF_SEPARATOR, 0, nullptr);
+
+    // 3. Exit
+    std::wstring exitText = Utf8ToWide(T("tray_exit"));
+    AppendMenuW(hMenu, MF_STRING, IDM_TRAY_EXIT, exitText.c_str());
+
+    // Required for proper menu dismiss behaviour
+    SetForegroundWindow(hwnd);
+    TrackPopupMenu(hMenu, TPM_RIGHTBUTTON, pt.x, pt.y, 0, hwnd, nullptr);
+    PostMessage(hwnd, WM_NULL, 0, 0);  // Ensure menu dismisses properly
+    DestroyMenu(hMenu);
+}
 void CleanupRenderTarget();
 bool LoadTextureFromMemory(ID3D11Device* pd3dDevice);
 void LoadFonts(ImGuiIO& io, float dpiScale);
@@ -665,6 +791,12 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
         }
         if (!running) break;
 
+        // When window is hidden (minimized to tray), skip rendering to save CPU
+        if (!IsWindowVisible(g_hwnd)) {
+            Sleep(100);
+            continue;
+        }
+
         // Handle DPI change — rebuild fonts
         if (g_fontRebuildNeeded) {
             g_dpiScale = g_pendingDpiScale;
@@ -735,6 +867,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
     }
 
     // Cleanup
+    RemoveTrayIcon();
     PlayerManager::Instance().Shutdown();
     ViGEmManager::Instance().Shutdown();
     ConfigManager::Instance().Save();
@@ -821,8 +954,43 @@ LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         return 0;
 
     case WM_DESTROY:
+        RemoveTrayIcon();
         PostQuitMessage(0);
         return 0;
+
+    case WM_CLOSE:
+        if (!g_forceQuit && ConfigManager::Instance().config.minimizeToTray) {
+            // Minimize to tray instead of closing
+            CreateTrayIcon(hWnd);
+            ShowWindow(hWnd, SW_HIDE);
+            return 0;
+        }
+        // Normal close
+        RemoveTrayIcon();
+        DestroyWindow(hWnd);
+        return 0;
+
+    case WM_TRAYICON:
+        if (lParam == WM_RBUTTONUP) {
+            ShowTrayMenu(hWnd);
+        } else if (lParam == WM_LBUTTONDBLCLK) {
+            RestoreFromTray(hWnd);
+        }
+        return 0;
+
+    case WM_COMMAND: {
+        WORD cmdId = LOWORD(wParam);
+        if (cmdId == IDM_TRAY_SHOW) {
+            RestoreFromTray(hWnd);
+        } else if (cmdId == IDM_TRAY_EXIT) {
+            g_forceQuit = true;
+            PostMessage(hWnd, WM_CLOSE, 0, 0);
+        } else if (cmdId >= IDM_TRAY_DISCONNECT_BASE && cmdId < IDM_TRAY_DISCONNECT_BASE + 100) {
+            int globalIdx = cmdId - IDM_TRAY_DISCONNECT_BASE;
+            PlayerManager::Instance().RemovePlayerByGlobalIndex(globalIdx);
+        }
+        return 0;
+    }
 
     case WM_NCCALCSIZE: {
         // Remove the standard window frame entirely

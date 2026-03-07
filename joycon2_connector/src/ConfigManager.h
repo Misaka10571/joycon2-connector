@@ -54,6 +54,7 @@ struct AppConfig {
     VibrationConfig vibrationConfig;
     std::string language;  // "en", "zh", or "" (auto-detect)
     std::map<uint64_t, DeviceSettings> deviceSettings;  // per-device settings, keyed by BLE address
+    bool minimizeToTray = false;  // Minimize to system tray on close instead of exiting
 };
 
 // Button mapping string conversion helpers
@@ -131,6 +132,7 @@ inline std::string ConfigToJSON(const AppConfig& config) {
     oss << "    \"intensity\": " << config.vibrationConfig.intensity << "\n";
     oss << "  },\n";
     oss << "  \"language\": \"" << config.language << "\",\n";
+    oss << "  \"minimizeToTray\": " << (config.minimizeToTray ? "true" : "false") << ",\n";
     oss << "  \"deviceSettings\": [\n";
     size_t dsIdx = 0;
     for (const auto& [addr, ds] : config.deviceSettings) {
@@ -244,6 +246,9 @@ inline bool JSONToConfig(const std::string& json, AppConfig& config) {
     config.language = ExtractJsonString(json, "language");
     if (config.language == "en") config.language = "en_us";
     else if (config.language == "zh") config.language = "zh_cn";
+
+    // Parse minimizeToTray
+    config.minimizeToTray = ExtractJsonBool(json, "minimizeToTray", false);
 
     // Parse per-device settings
     config.deviceSettings.clear();

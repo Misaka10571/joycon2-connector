@@ -1119,6 +1119,19 @@ inline void RenderSettings() {
 
     ImGui::Spacing(); ImGui::Spacing();
 
+    // ---- Minimize to tray card ----
+    BeginCard();
+
+    bool& trayVal = ConfigManager::Instance().config.minimizeToTray;
+    if (ImGui::Checkbox(T("settings_minimize_to_tray"), &trayVal)) {
+        ConfigManager::Instance().Save();
+    }
+    ImGui::TextColored(UITheme::TextTertiary, "%s", T("settings_minimize_to_tray_hint"));
+
+    EndCard();
+
+    ImGui::Spacing(); ImGui::Spacing();
+
     // ---- About card ----
     BeginCard();
 
