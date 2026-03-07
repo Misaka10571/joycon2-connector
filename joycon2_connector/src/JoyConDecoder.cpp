@@ -606,12 +606,10 @@ XUSB_REPORT GenerateDualJoyConXUSBReport(const std::vector<uint8_t>& leftBuffer,
     decode_triggers_shoulders(leftState, true, true, lt, rt, ls, rs);
     report.bLeftTrigger = lt;
     if (ls) report.wButtons |= XUSB_GAMEPAD_LEFT_SHOULDER;
-    if (lt) report.wButtons |= XUSB_GAMEPAD_LEFT_SHOULDER;  // digital trigger
 
     decode_triggers_shoulders(rightState, false, true, lt, rt, ls, rs);
     report.bRightTrigger = rt;
     if (rs) report.wButtons |= XUSB_GAMEPAD_RIGHT_SHOULDER;
-    if (rt) report.wButtons |= XUSB_GAMEPAD_RIGHT_SHOULDER;
 
     // Left stick from left joycon, right stick from right joycon
     report.sThumbLX = leftReport.sThumbLX;
@@ -655,8 +653,6 @@ XUSB_REPORT GenerateProControllerXUSBReport(const std::vector<uint8_t>& buffer) 
     // Triggers (digital → full press)
     report.bLeftTrigger = (state & TRIGGER_LT_MASK) ? 255 : 0;
     report.bRightTrigger = (state & TRIGGER_RT_MASK) ? 255 : 0;
-    if (state & TRIGGER_LT_MASK)      report.wButtons |= XUSB_GAMEPAD_LEFT_SHOULDER;
-    if (state & TRIGGER_RT_MASK)      report.wButtons |= XUSB_GAMEPAD_RIGHT_SHOULDER;
 
     // Sticks (XUSB uses SHORT -32768..32767)
     auto [lx, ly] = decode_pro_joystick(&buffer[10]);
@@ -703,8 +699,6 @@ XUSB_REPORT GenerateNSOGCXUSBReport(const std::vector<uint8_t>& buffer) {
     // Analog triggers (GC has analog triggers)
     report.bLeftTrigger = buffer[0x3c];
     report.bRightTrigger = buffer[0x3d];
-    if (state & TRIGGER_LT_MASK)      report.wButtons |= XUSB_GAMEPAD_LEFT_SHOULDER;
-    if (state & TRIGGER_RT_MASK)      report.wButtons |= XUSB_GAMEPAD_RIGHT_SHOULDER;
 
     // Sticks
     auto [lx, ly] = decode_pro_joystick(&buffer[10]);
