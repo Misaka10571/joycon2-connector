@@ -35,7 +35,7 @@ include_directories(
   ${CMAKE_BINARY_DIR}/generated
 )
 
-# Core application sources (exclude old testapp.cpp)
+# Core application sources
 set(APP_SOURCES
   src/App.cpp
   src/JoyConDecoder.cpp
