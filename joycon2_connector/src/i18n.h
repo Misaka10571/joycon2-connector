@@ -1,126 +1,202 @@
 #pragma once
 #include <string>
 #include <unordered_map>
+#include <vector>
+#include <algorithm>
 #include <Windows.h>
+#include "lang_data.h"
 
-enum class Lang { EN, ZH };
+// Information about an available language
+struct LangInfo {
+    std::string locale;       // e.g. "zh_cn", "en_us"
+    std::string displayName;  // e.g. "中文", "English"
+    std::string jsonData;     // full JSON content (embedded)
+};
 
-inline Lang g_currentLang = Lang::ZH;
+// Internationalization manager — loads translations from embedded JSON data
+class I18nManager {
+public:
+    static I18nManager& Instance() {
+        static I18nManager inst;
+        return inst;
+    }
 
-// Detect system UI language: returns ZH for Chinese, EN for everything else
-inline Lang DetectSystemLanguage() {
+    // Initialize from embedded language data (compiled into the binary)
+    void InitFromEmbedded() {
+        availableLanguages.clear();
+        const auto& embedded = GetEmbeddedLanguages();
+        for (const auto& e : embedded) {
+            std::string content(e.jsonData);
+            LangInfo info;
+            info.jsonData = content;
+            info.locale = ExtractJsonValue(content, "_locale");
+            info.displayName = ExtractJsonValue(content, "_display_name");
+            if (!info.locale.empty() && !info.displayName.empty()) {
+                availableLanguages.push_back(std::move(info));
+            }
+        }
+        // Sort by locale for stable ordering
+        std::sort(availableLanguages.begin(), availableLanguages.end(),
+            [](const LangInfo& a, const LangInfo& b) { return a.locale < b.locale; });
+    }
+
+    // Load a specific language by locale code (e.g. "zh_cn")
+    bool LoadLanguage(const std::string& locale) {
+        for (const auto& lang : availableLanguages) {
+            if (lang.locale == locale) {
+                translations.clear();
+                ParseJsonToMap(lang.jsonData, translations);
+                currentLocale = locale;
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // Translate a key; returns key itself if not found
+    const char* Translate(const char* key) {
+        auto it = translations.find(key);
+        if (it != translations.end()) {
+            return it->second.c_str();
+        }
+        return key;
+    }
+
+    const std::vector<LangInfo>& GetAvailableLanguages() const {
+        return availableLanguages;
+    }
+
+    const std::string& GetCurrentLocale() const {
+        return currentLocale;
+    }
+
+    // Find index of a locale in availableLanguages, -1 if not found
+    int GetLocaleIndex(const std::string& locale) const {
+        for (int i = 0; i < (int)availableLanguages.size(); ++i) {
+            if (availableLanguages[i].locale == locale) return i;
+        }
+        return -1;
+    }
+
+private:
+    I18nManager() = default;
+
+    std::vector<LangInfo> availableLanguages;
+    std::unordered_map<std::string, std::string> translations;
+    std::string currentLocale;
+
+    // Extract a string value for a given key from JSON content
+    // Handles simple "key": "value" pairs (no nested objects)
+    static std::string ExtractJsonValue(const std::string& json, const std::string& key) {
+        std::string searchKey = "\"" + key + "\"";
+        auto pos = json.find(searchKey);
+        if (pos == std::string::npos) return "";
+        pos = json.find(':', pos + searchKey.size());
+        if (pos == std::string::npos) return "";
+        pos++; // skip ':'
+        // Skip whitespace
+        while (pos < json.size() && (json[pos] == ' ' || json[pos] == '\t' || json[pos] == '\r' || json[pos] == '\n'))
+            pos++;
+        if (pos >= json.size() || json[pos] != '"') return "";
+        pos++; // skip opening '"'
+        std::string result;
+        while (pos < json.size() && json[pos] != '"') {
+            if (json[pos] == '\\' && pos + 1 < json.size()) {
+                char next = json[pos + 1];
+                if (next == '"') { result += '"'; pos += 2; continue; }
+                if (next == '\\') { result += '\\'; pos += 2; continue; }
+                if (next == 'n') { result += '\n'; pos += 2; continue; }
+                if (next == 't') { result += '\t'; pos += 2; continue; }
+                if (next == '/') { result += '/'; pos += 2; continue; }
+                if (next == 'u') {
+                    // Parse \uXXXX unicode escape
+                    if (pos + 5 < json.size()) {
+                        std::string hexStr = json.substr(pos + 2, 4);
+                        unsigned int codepoint = 0;
+                        try { codepoint = std::stoul(hexStr, nullptr, 16); } catch (...) {}
+                        if (codepoint > 0) {
+                            // Encode as UTF-8
+                            if (codepoint <= 0x7F) {
+                                result += (char)codepoint;
+                            } else if (codepoint <= 0x7FF) {
+                                result += (char)(0xC0 | (codepoint >> 6));
+                                result += (char)(0x80 | (codepoint & 0x3F));
+                            } else {
+                                result += (char)(0xE0 | (codepoint >> 12));
+                                result += (char)(0x80 | ((codepoint >> 6) & 0x3F));
+                                result += (char)(0x80 | (codepoint & 0x3F));
+                            }
+                        }
+                        pos += 6;
+                        continue;
+                    }
+                }
+                // Unknown escape, keep as-is
+                result += json[pos];
+                pos++;
+            } else {
+                result += json[pos];
+                pos++;
+            }
+        }
+        return result;
+    }
+
+    // Parse all "key": "value" pairs from a flat JSON object into a map
+    static void ParseJsonToMap(const std::string& json, std::unordered_map<std::string, std::string>& map) {
+        size_t pos = 0;
+        while (pos < json.size()) {
+            // Find next key (opening quote)
+            auto keyStart = json.find('"', pos);
+            if (keyStart == std::string::npos) break;
+            auto keyEnd = json.find('"', keyStart + 1);
+            if (keyEnd == std::string::npos) break;
+            std::string key = json.substr(keyStart + 1, keyEnd - keyStart - 1);
+
+            // Find colon
+            auto colonPos = json.find(':', keyEnd + 1);
+            if (colonPos == std::string::npos) break;
+
+            // Skip whitespace after colon
+            size_t valPos = colonPos + 1;
+            while (valPos < json.size() && (json[valPos] == ' ' || json[valPos] == '\t' || json[valPos] == '\r' || json[valPos] == '\n'))
+                valPos++;
+
+            if (valPos >= json.size() || json[valPos] != '"') {
+                // Not a string value, skip past this line
+                pos = valPos + 1;
+                continue;
+            }
+
+            // Use ExtractJsonValue to properly handle escapes
+            std::string value = ExtractJsonValue(json.substr(keyStart), key);
+            if (!key.empty()) {
+                map[key] = value;
+            }
+
+            // Move past the value string
+            valPos++; // skip opening quote
+            while (valPos < json.size()) {
+                if (json[valPos] == '\\') { valPos += 2; continue; }
+                if (json[valPos] == '"') { valPos++; break; }
+                valPos++;
+            }
+            pos = valPos;
+        }
+    }
+};
+
+// Detect system UI language: returns locale string
+inline std::string DetectSystemLanguage() {
     LANGID langId = GetUserDefaultUILanguage();
     WORD primaryLang = PRIMARYLANGID(langId);
     if (primaryLang == LANG_CHINESE) {
-        return Lang::ZH;
+        return "zh_cn";
     }
-    return Lang::EN;
+    return "en_us";
 }
 
+// Global translation function — signature unchanged, all call sites work as before
 inline const char* T(const char* key) {
-    static const std::unordered_map<std::string, std::unordered_map<std::string, std::string>> table = {
-        // App
-        {"app_title",           {{"en", "JoyCon2 Connector"},        {"zh", u8"JoyCon2 连接器"}}},
-
-        // Navigation
-        {"nav_dashboard",       {{"en", "Dashboard"},                {"zh", u8"仪表盘"}}},
-        {"nav_add_device",      {{"en", "Add Device"},               {"zh", u8"添加设备"}}},
-        {"nav_layout_mgr",     {{"en", "Layout Manager"},           {"zh", u8"背键布局"}}},
-        {"nav_mouse_settings", {{"en", "Mouse Settings"},           {"zh", u8"鼠标设置"}}},
-        {"nav_language",        {{"en", "Language"},                  {"zh", u8"语言"}}},
-
-        // Dashboard
-        {"dash_vigem_ok",       {{"en", "ViGEm Connected"},          {"zh", u8"ViGEm 已连接"}}},
-        {"dash_vigem_fail",     {{"en", "ViGEm Not Found"},          {"zh", u8"ViGEm 未找到"}}},
-        {"dash_no_device",      {{"en", "No controllers connected"}, {"zh", u8"暂无已连接的手柄"}}},
-        {"dash_no_device_hint", {{"en", "Click \"Add Device\" to get started"}, {"zh", u8"点击「添加设备」开始连接"}}},
-        {"dash_player",         {{"en", "Player"},                   {"zh", u8"玩家"}}},
-        {"dash_mapping",        {{"en", "Mapping: DS4"},             {"zh", u8"映射: DS4"}}},
-        {"dash_gyro_source",    {{"en", "Gyro Source"},              {"zh", u8"体感源"}}},
-        {"dash_disconnect",     {{"en", "Disconnect"},               {"zh", u8"断开连接"}}},
-        {"dash_side_left",      {{"en", "Left"},                     {"zh", u8"左"}}},
-        {"dash_side_right",     {{"en", "Right"},                    {"zh", u8"右"}}},
-        {"dash_orient_upright", {{"en", "Upright"},                  {"zh", u8"竖握"}}},
-        {"dash_orient_sideways",{{"en", "Sideways"},                 {"zh", u8"横握"}}},
-        {"dash_gyro_both",      {{"en", "Both"},                     {"zh", u8"双侧"}}},
-        {"dash_gyro_left",      {{"en", "Left"},                     {"zh", u8"左侧"}}},
-        {"dash_gyro_right",     {{"en", "Right"},                    {"zh", u8"右侧"}}},
-        {"dash_settings",       {{"en", "Settings"},                 {"zh", u8"设置"}}},
-        {"dash_swap_abxy",      {{"en", u8"Swap A\u21c4B / X\u21c4Y"},         {"zh", u8"交换 A\u21c4B / X\u21c4Y"}}},
-        {"dash_swap_abxy_hint", {{"en", u8"Nintendo \u21c4 Xbox button layout"},{"zh", u8"任天堂 \u21c4 Xbox 按键布局"}}},
-        {"dash_raw_vibration",  {{"en", "Raw vibration mode"},               {"zh", u8"原始振动模式"}}},
-        {"dash_raw_vibration_hint", {{"en", "Disable if vibration feels wrong; enable if controller beeps during rumble"},{"zh", u8"如果振动异常请关闭；如果手柄震动时发出蜂鸣声请开启"}}},
-
-        // Controller Types
-        {"type_single_joycon",  {{"en", "Single Joy-Con"},           {"zh", u8"单 Joy-Con"}}},
-        {"type_dual_joycon",    {{"en", "Dual Joy-Con"},             {"zh", u8"双 Joy-Con"}}},
-        {"type_pro",            {{"en", "Pro Controller"},           {"zh", u8"Pro 手柄"}}},
-        {"type_nso_gc",         {{"en", "NSO GC Controller"},        {"zh", u8"NSO GC 手柄"}}},
-
-        // Add Device Wizard
-        {"add_step1_title",     {{"en", "Select Controller Type"},   {"zh", u8"选择手柄类型"}}},
-        {"add_step2_title",     {{"en", "Configure Options"},        {"zh", u8"配置选项"}}},
-        {"add_step3_title",     {{"en", "Scanning..."},              {"zh", u8"扫描中..."}}},
-        {"add_select_side",     {{"en", "Select Side"},              {"zh", u8"选择方向"}}},
-        {"add_select_orient",   {{"en", "Select Grip"},              {"zh", u8"选择握法"}}},
-        {"add_select_gyro",     {{"en", "Select Gyro Source"},       {"zh", u8"选择体感源"}}},
-        {"add_start_scan",      {{"en", "Start Scanning"},           {"zh", u8"开始扫描"}}},
-        {"add_cancel",          {{"en", "Cancel"},                   {"zh", u8"取消"}}},
-        {"add_back",            {{"en", "Back"},                     {"zh", u8"上一步"}}},
-        {"add_next",            {{"en", "Next"},                     {"zh", u8"下一步"}}},
-        {"add_scanning_hint",   {{"en", "Press the sync button on your controller..."}, {"zh", u8"请按下手柄上的同步按钮..."}}},
-        {"add_pre_scan_hint",  {{"en", "Ensure the controller is powered off before scanning."},
-                                                                     {"zh", u8"请确保手柄在开始扫描前处于关机状态。"}}},
-        {"add_scanning_active_hint", {{"en", "Press and HOLD the sync button on the controller until connected."},
-                                                                     {"zh", u8"请按住手柄上的同步按钮不松，直到连接成功。"}}},
-        {"add_scan_right_title", {{"en", "Scan RIGHT Joy-Con"},      {"zh", u8"扫描右 Joy-Con"}}},
-        {"add_scan_left_title",  {{"en", "Scan LEFT Joy-Con"},       {"zh", u8"扫描左 Joy-Con"}}},
-        {"add_right_connected", {{"en", "RIGHT Joy-Con connected successfully!"},
-                                                                     {"zh", u8"右 Joy-Con 连接成功！"}}},
-        {"add_connected",       {{"en", "Connected!"},               {"zh", u8"已连接！"}}},
-        {"add_timeout",         {{"en", "Scan timed out. Try again."}, {"zh", u8"扫描超时，请重试。"}}},
-
-        // Layout Manager
-        {"layout_title",        {{"en", "GL/GR Button Layout"},      {"zh", u8"GL/GR 背键布局"}}},
-        {"layout_add",          {{"en", "New Layout"},               {"zh", u8"新建布局"}}},
-        {"layout_delete",       {{"en", "Delete"},                   {"zh", u8"删除"}}},
-        {"layout_rename",       {{"en", "Rename"},                   {"zh", u8"重命名"}}},
-        {"layout_set_active",   {{"en", "Set Active"},               {"zh", u8"设为激活"}}},
-        {"layout_active_badge", {{"en", "Active"},                   {"zh", u8"当前"}}},
-        {"layout_gl",           {{"en", "GL Mapping"},               {"zh", u8"GL 映射"}}},
-        {"layout_gr",           {{"en", "GR Mapping"},               {"zh", u8"GR 映射"}}},
-        {"layout_hint",         {{"en", "Press C to cycle layouts in-game\nPress ZL+ZR+GL+GR to open management"}, {"zh", u8"游戏中按 C 键切换布局\n按 ZL+ZR+GL+GR 呼出管理"}}},
-        {"layout_no_layouts",   {{"en", "No layouts configured"},    {"zh", u8"未配置布局"}}},
-        {"layout_name_label",   {{"en", "Layout Name"},              {"zh", u8"布局名称"}}},
-
-        // Mouse Settings
-        {"mouse_title",         {{"en", "Optical Mouse Settings"},   {"zh", u8"光学鼠标设置"}}},
-        {"mouse_enable",        {{"en", "CHAT key toggles mouse mode"}, {"zh", u8"CHAT 键切换鼠标模式"}}},
-        {"mouse_fast",          {{"en", "Fast Sensitivity"},         {"zh", u8"高灵敏度"}}},
-        {"mouse_normal",        {{"en", "Normal Sensitivity"},       {"zh", u8"中灵敏度"}}},
-        {"mouse_slow",          {{"en", "Low Sensitivity"},          {"zh", u8"低灵敏度"}}},
-        {"mouse_scroll_speed",  {{"en", "Scroll Speed"},             {"zh", u8"滚轮速度"}}},
-        {"mouse_current_mode",  {{"en", "Current Mode"},             {"zh", u8"当前模式"}}},
-        {"mouse_mode_off",      {{"en", "OFF"},                      {"zh", u8"关闭"}}},
-        {"mouse_mode_fast",     {{"en", "FAST"},                     {"zh", u8"快速"}}},
-        {"mouse_mode_normal",   {{"en", "NORMAL"},                   {"zh", u8"普通"}}},
-        {"mouse_mode_slow",     {{"en", "SLOW"},                     {"zh", u8"慢速"}}},
-        {"mouse_hint",          {{"en", "Only available for Right Joy-Con (Joy-Con 2)"},
-                                                                     {"zh", u8"仅适用于右 Joy-Con (Joy-Con 2)"}}},
-        {"mouse_interpolation",  {{"en", "Smooth Cursor (Interpolation)"},
-                                                                     {"zh", u8"光标平滑（插值）"}}},
-        {"mouse_interp_rate",    {{"en", "Interpolation Rate (Hz)"},
-                                                                     {"zh", u8"插值频率 (Hz)"}}},
-
-    };
-
-    std::string langKey = (g_currentLang == Lang::EN) ? "en" : "zh";
-    auto it = table.find(key);
-    if (it != table.end()) {
-        auto langIt = it->second.find(langKey);
-        if (langIt != it->second.end()) {
-            return langIt->second.c_str();
-        }
-    }
-    return key;
+    return I18nManager::Instance().Translate(key);
 }

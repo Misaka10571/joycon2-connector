@@ -80,8 +80,9 @@ static NavItem g_navItems[] = {
     { "nav_add_device" },
     { "nav_layout_mgr" },
     { "nav_mouse_settings" },
+    { "nav_settings" },
 };
-static const int NAV_COUNT = 4;
+static const int NAV_COUNT = 5;
 
 // Windows system font candidates
 static const char* FONT_CJK_CANDIDATES[] = { "msyh.ttc", "msyhbd.ttc", "simsun.ttc", "malgun.ttf" };
@@ -401,24 +402,9 @@ void RenderSidebar() {
         ImGui::PopID();
     }
 
-    // Bottom: Language toggle + version
-    float bottomY = ImGui::GetWindowHeight() - S(82);
+    // Bottom: Version display
+    float bottomY = ImGui::GetWindowHeight() - S(40);
     ImGui::SetCursorPos(ImVec2(S(20), bottomY));
-    ImGui::TextColored(UITheme::TextTertiary, "%s", T("nav_language"));
-    ImGui::SetCursorPosX(S(20));
-
-    ImGui::PushStyleColor(ImGuiCol_Button, UITheme::ButtonSecondary);
-    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, UITheme::ButtonSecondaryHov);
-    ImGui::PushStyleColor(ImGuiCol_Text, UITheme::TextPrimary);
-    if (ImGui::Button(g_currentLang == Lang::EN ? "English" : u8"\u4E2D\u6587", ImVec2(S(80), S(32)))) {
-        g_currentLang = (g_currentLang == Lang::EN) ? Lang::ZH : Lang::EN;
-        ConfigManager::Instance().config.language = (g_currentLang == Lang::EN) ? "en" : "zh";
-        ConfigManager::Instance().Save();
-    }
-    ImGui::PopStyleColor(3);
-
-    // Version display
-    ImGui::SetCursorPosX(S(20));
     ImGui::TextColored(UITheme::TextTertiary, "v%s", APP_VERSION);
 
     ImGui::EndChild();
@@ -640,17 +626,27 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
     ConfigManager::Instance().Load();
     ConfigManager::Instance().EnsureDefaults();
 
-    // Initialize language from config, or detect from system
+    // Initialize language: load from embedded data, then select from config or detect
     {
+        I18nManager::Instance().InitFromEmbedded();
+
         auto& lang = ConfigManager::Instance().config.language;
-        if (lang == "en") {
-            g_currentLang = Lang::EN;
-        } else if (lang == "zh") {
-            g_currentLang = Lang::ZH;
-        } else {
-            // First launch or legacy config: detect system language
-            g_currentLang = DetectSystemLanguage();
-            lang = (g_currentLang == Lang::EN) ? "en" : "zh";
+        // Backward compatibility: map old short codes to new locale codes
+        if (lang == "en") lang = "en_us";
+        else if (lang == "zh") lang = "zh_cn";
+
+        if (lang.empty() || !I18nManager::Instance().LoadLanguage(lang)) {
+            // First launch or unknown locale: detect from system
+            std::string detected = DetectSystemLanguage();
+            if (!I18nManager::Instance().LoadLanguage(detected)) {
+                // Fallback: try to load any available language
+                const auto& langs = I18nManager::Instance().GetAvailableLanguages();
+                if (!langs.empty()) {
+                    detected = langs[0].locale;
+                    I18nManager::Instance().LoadLanguage(detected);
+                }
+            }
+            lang = detected;
             ConfigManager::Instance().Save();
         }
     }
@@ -723,6 +719,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
         case 1: RenderAddDevice(g_activePage); break;
         case 2: RenderLayoutManager(); break;
         case 3: RenderMouseSettings(); break;
+        case 4: RenderSettings(); break;
         }
         ImGui::EndChild();
 

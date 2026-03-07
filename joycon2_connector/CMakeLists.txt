@@ -15,6 +15,19 @@ configure_file(
   @ONLY
 )
 
+# Generate embedded language data header from languages/*.json
+file(GLOB LANG_JSON_FILES "${CMAKE_SOURCE_DIR}/languages/*.json")
+add_custom_command(
+  OUTPUT "${CMAKE_BINARY_DIR}/generated/lang_data.h"
+  COMMAND ${CMAKE_COMMAND}
+    -DLANG_DIR="${CMAKE_SOURCE_DIR}/languages"
+    -DOUTPUT_FILE="${CMAKE_BINARY_DIR}/generated/lang_data.h"
+    -P "${CMAKE_SOURCE_DIR}/cmake/embed_languages.cmake"
+  DEPENDS ${LANG_JSON_FILES} "${CMAKE_SOURCE_DIR}/cmake/embed_languages.cmake"
+  COMMENT "Embedding language files into lang_data.h"
+)
+add_custom_target(generate_lang_data DEPENDS "${CMAKE_BINARY_DIR}/generated/lang_data.h")
+
 include_directories(
   src
   src/imgui
@@ -44,6 +57,7 @@ set(IMGUI_SOURCES
 )
 
 add_executable(joycon2_connector WIN32 ${APP_SOURCES} ${IMGUI_SOURCES} ${RC_SOURCES})
+add_dependencies(joycon2_connector generate_lang_data)
 
 target_link_directories(joycon2_connector PRIVATE ${CMAKE_SOURCE_DIR}/lib)
 target_link_libraries(joycon2_connector

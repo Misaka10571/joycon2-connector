@@ -240,8 +240,10 @@ inline bool JSONToConfig(const std::string& json, AppConfig& config) {
         }
     }
 
-    // Parse language
+    // Parse language (with backward compatibility for old short codes)
     config.language = ExtractJsonString(json, "language");
+    if (config.language == "en") config.language = "en_us";
+    else if (config.language == "zh") config.language = "zh_cn";
 
     // Parse per-device settings
     config.deviceSettings.clear();

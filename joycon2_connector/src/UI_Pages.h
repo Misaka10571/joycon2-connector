@@ -1,5 +1,5 @@
 #pragma once
-// UI Pages - Dashboard, Add Device, Layout Manager, Mouse Settings
+// UI Pages - Dashboard, Add Device, Layout Manager, Mouse Settings, Settings
 #include "imgui/imgui.h"
 #include "i18n.h"
 #include "ConfigManager.h"
@@ -7,6 +7,7 @@
 #include "DeviceManager.h"
 #include "ViGEmManager.h"
 #include "UI_Theme.h"
+#include "version.h"
 #include <string>
 #include <cmath>
 #include <algorithm>
@@ -1061,6 +1062,78 @@ inline void RenderMouseSettings() {
     EndCard();
 
     if (changed) ConfigManager::Instance().Save();
+
+    ImGui::EndChild();
+}
+
+// =============================================================
+// PAGE: Settings
+// =============================================================
+inline void RenderSettings() {
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(S(24), S(24)));
+    ImGui::BeginChild("SettingsContent", ImVec2(0, 0), ImGuiChildFlags_None);
+    ImGui::PopStyleVar();
+    ImGui::SetCursorPos(ImVec2(S(24), S(16)));
+
+    SectionLabel(T("settings_title"));
+    ImGui::Spacing(); ImGui::Spacing();
+
+    // ---- Language selection card ----
+    BeginCard();
+
+    ImGui::Text("%s", T("settings_language"));
+    ImGui::TextColored(UITheme::TextTertiary, "%s", T("settings_language_hint"));
+    ImGui::Spacing();
+
+    const auto& langs = I18nManager::Instance().GetAvailableLanguages();
+    int currentIdx = I18nManager::Instance().GetLocaleIndex(
+        I18nManager::Instance().GetCurrentLocale());
+    if (currentIdx < 0) currentIdx = 0;
+
+    // Build display names for Combo — use a lambda with static storage
+    // to keep the strings alive for ImGui
+    static std::vector<std::string> langDisplayNames;
+    static std::vector<const char*> langDisplayPtrs;
+    langDisplayNames.clear();
+    langDisplayPtrs.clear();
+    for (const auto& lang : langs) {
+        langDisplayNames.push_back(lang.displayName);
+    }
+    for (const auto& name : langDisplayNames) {
+        langDisplayPtrs.push_back(name.c_str());
+    }
+
+    ImGui::SetNextItemWidth(S(220));
+    if (!langDisplayPtrs.empty()) {
+        if (ImGui::Combo("##lang", &currentIdx, langDisplayPtrs.data(), (int)langDisplayPtrs.size())) {
+            if (currentIdx >= 0 && currentIdx < (int)langs.size()) {
+                const std::string& newLocale = langs[currentIdx].locale;
+                I18nManager::Instance().LoadLanguage(newLocale);
+                ConfigManager::Instance().config.language = newLocale;
+                ConfigManager::Instance().Save();
+            }
+        }
+    }
+
+    EndCard();
+
+    ImGui::Spacing(); ImGui::Spacing();
+
+    // ---- About card ----
+    BeginCard();
+
+    ImGui::Text("%s", T("settings_about"));
+    ImGui::Spacing();
+
+    ImGui::PushFont(ImGui::GetIO().Fonts->Fonts.Size > 1 ? ImGui::GetIO().Fonts->Fonts[1] : nullptr);
+    ImGui::TextColored(UITheme::Primary, "JoyCon2 Connector");
+    if (ImGui::GetIO().Fonts->Fonts.Size > 1) ImGui::PopFont();
+
+    ImGui::TextColored(UITheme::TextTertiary, "v%s", APP_VERSION);
+    ImGui::Spacing();
+    ImGui::TextColored(UITheme::TextTertiary, "%s", T("settings_about_desc"));
+
+    EndCard();
 
     ImGui::EndChild();
 }
