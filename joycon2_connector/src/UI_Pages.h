@@ -526,6 +526,24 @@ inline void RenderDashboard() {
                     ConfigManager::Instance().Save();
                 }
                 ImGui::TextColored(UITheme::TextTertiary, "%s", T("dash_swap_abxy_hint"));
+
+                ImGui::Spacing();
+                ImGui::Separator();
+                ImGui::Spacing();
+
+                // Raw vibration toggle (Pro2 / NSO GC)
+                bool rawVib = p.useRawVibrationFlag->load(std::memory_order_relaxed);
+                if (ImGui::Checkbox(T("dash_raw_vibration"), &rawVib)) {
+                    p.useRawVibrationFlag->store(rawVib, std::memory_order_relaxed);
+                    ConfigManager::Instance().GetDeviceSettings(p.bleAddress).useRawVibration = rawVib;
+                    ConfigManager::Instance().Save();
+                    // Also update the live VibrationContext if it exists
+                    if (p.vibCtx && p.vibCtx->useRawVibration) {
+                        p.vibCtx->useRawVibration->store(rawVib, std::memory_order_relaxed);
+                    }
+                }
+                ImGui::TextColored(UITheme::TextTertiary, "%s", T("dash_raw_vibration_hint"));
+
                 ImGui::EndPopup();
             }
             ImGui::PopStyleVar(2);

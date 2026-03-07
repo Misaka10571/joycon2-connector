@@ -48,6 +48,8 @@ inline const char* T(const char* key) {
         {"dash_settings",       {{"en", "Settings"},                 {"zh", u8"设置"}}},
         {"dash_swap_abxy",      {{"en", u8"Swap A\u21c4B / X\u21c4Y"},         {"zh", u8"交换 A\u21c4B / X\u21c4Y"}}},
         {"dash_swap_abxy_hint", {{"en", u8"Nintendo \u21c4 Xbox button layout"},{"zh", u8"任天堂 \u21c4 Xbox 按键布局"}}},
+        {"dash_raw_vibration",  {{"en", "Raw vibration mode"},               {"zh", u8"原始振动模式"}}},
+        {"dash_raw_vibration_hint", {{"en", "Disable if vibration feels wrong; enable if controller beeps during rumble"},{"zh", u8"如果振动异常请关闭；如果手柄震动时发出蜂鸣声请开启"}}},
 
         // Controller Types
         {"type_single_joycon",  {{"en", "Single Joy-Con"},           {"zh", u8"单 Joy-Con"}}},

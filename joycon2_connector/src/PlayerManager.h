@@ -21,7 +21,11 @@ struct VibrationContext {
     GattCharacteristic writeCharRight{ nullptr };  // for dual joycon
     bool isDual = false;
     std::chrono::steady_clock::time_point lastSendTime{};
-    uint8_t lastSample = 0xFF;  // track to avoid redundant sends
+    uint8_t lastMotorL = 0;       // track to avoid redundant sends
+    uint8_t lastMotorR = 0;       // track to avoid redundant sends
+    uint8_t lastSample = 0xFF;    // track for sample-mode dedup
+    uint8_t sequenceCounter = 0;  // raw vibration frame sequence (lower 4 bits used)
+    std::shared_ptr<std::atomic<bool>> useRawVibration; // per-device vibration mode toggle
     static constexpr int MIN_INTERVAL_MS = 50;     // throttle BLE writes
 };
 
@@ -51,38 +55,64 @@ inline VOID CALLBACK DS4VibrationCallback(
     uint8_t motorL = static_cast<uint8_t>((std::min)(scaledLarge, 255.0f));
     uint8_t motorR = static_cast<uint8_t>((std::min)(scaledSmall, 255.0f));
 
-    // Map motor values to predefined vibration samples
-    uint8_t sample;
-    if (motorL == 0 && motorR == 0) {
-        sample = VIB_NONE;
-    } else if (motorL > 180 || motorR > 180) {
-        sample = VIB_BUZZ;           // Strong sustained vibration
-    } else if (motorL > 80 || motorR > 80) {
-        sample = VIB_STRONG_THUNK;   // Medium impact
+    // Determine vibration mode: raw motor control (0x5N) vs predefined samples (0x0A)
+    bool rawMode = ctx->useRawVibration && ctx->useRawVibration->load(std::memory_order_relaxed);
+
+    if (rawMode) {
+        // --- Raw vibration mode (0x5N protocol) ---
+        // Directly controls vibration motors, no audible beep on Pro2.
+        if (motorL == ctx->lastMotorL && motorR == ctx->lastMotorR) return;
+        ctx->lastMotorL = motorL;
+        ctx->lastMotorR = motorR;
+        ctx->lastSendTime = now;
+
+        bool vibEnabled = (motorL > 0 || motorR > 0);
+        uint8_t seq = ctx->sequenceCounter++;
+
+        if (ctx->isDual) {
+            uint8_t leftData[12], rightData[12];
+            EncodeVibrationPayload(motorL, 0, leftData);
+            EncodeVibrationPayload(0, motorR, rightData);
+            if (ctx->writeCharLeft)
+                SendRawVibrationAsync(ctx->writeCharLeft, motorL > 0, leftData, seq);
+            if (ctx->writeCharRight)
+                SendRawVibrationAsync(ctx->writeCharRight, motorR > 0, rightData, seq);
+        } else {
+            uint8_t vibData[12];
+            EncodeVibrationPayload(motorL, motorR, vibData);
+            if (ctx->writeChar)
+                SendRawVibrationAsync(ctx->writeChar, vibEnabled, vibData, seq);
+        }
     } else {
-        sample = VIB_DUN;            // Light feedback
-    }
-
-    // Skip if same sample as last sent
-    if (sample == ctx->lastSample && sample != VIB_NONE) return;
-    ctx->lastSample = sample;
-    ctx->lastSendTime = now;
-
-    if (ctx->isDual) {
-        // Dual JoyCon: large motor -> left, small motor -> right
-        if (ctx->writeCharLeft && motorL > 0) {
-            SendVibrationSampleAsync(ctx->writeCharLeft, sample);
-        }
-        if (ctx->writeCharRight && motorR > 0) {
-            SendVibrationSampleAsync(ctx->writeCharRight, sample);
-        }
+        // --- Predefined sample mode (0x0A command) ---
+        // Uses firmware sound/haptic samples. May cause audible beep on some controllers.
+        uint8_t sample;
         if (motorL == 0 && motorR == 0) {
-            if (ctx->writeCharLeft)  SendVibrationSampleAsync(ctx->writeCharLeft, VIB_NONE);
-            if (ctx->writeCharRight) SendVibrationSampleAsync(ctx->writeCharRight, VIB_NONE);
+            sample = VIB_NONE;
+        } else if (motorL > 180 || motorR > 180) {
+            sample = VIB_BUZZ;
+        } else if (motorL > 80 || motorR > 80) {
+            sample = VIB_STRONG_THUNK;
+        } else {
+            sample = VIB_DUN;
         }
-    } else {
-        if (ctx->writeChar) {
-            SendVibrationSampleAsync(ctx->writeChar, sample);
+
+        if (sample == ctx->lastSample && sample != VIB_NONE) return;
+        ctx->lastSample = sample;
+        ctx->lastSendTime = now;
+
+        if (ctx->isDual) {
+            if (ctx->writeCharLeft && motorL > 0)
+                SendVibrationSampleAsync(ctx->writeCharLeft, sample);
+            if (ctx->writeCharRight && motorR > 0)
+                SendVibrationSampleAsync(ctx->writeCharRight, sample);
+            if (motorL == 0 && motorR == 0) {
+                if (ctx->writeCharLeft)  SendVibrationSampleAsync(ctx->writeCharLeft, VIB_NONE);
+                if (ctx->writeCharRight) SendVibrationSampleAsync(ctx->writeCharRight, VIB_NONE);
+            }
+        } else {
+            if (ctx->writeChar)
+                SendVibrationSampleAsync(ctx->writeChar, sample);
         }
     }
 }
@@ -201,6 +231,7 @@ struct ProControllerPlayer {
     std::unique_ptr<VibrationContext> vibCtx;
     // Per-device settings
     std::shared_ptr<std::atomic<bool>> swapABXYFlag = std::make_shared<std::atomic<bool>>(false);
+    std::shared_ptr<std::atomic<bool>> useRawVibrationFlag = std::make_shared<std::atomic<bool>>(true);
     uint64_t bleAddress = 0;
 };
 
@@ -647,6 +678,8 @@ public:
         // Create shared swap flag so BLE callback lambda can access it safely
         auto swapFlag = std::make_shared<std::atomic<bool>>(
             ConfigManager::Instance().GetDeviceSettings(controller.bleAddress).swapABXY);
+        auto rawVibFlag = std::make_shared<std::atomic<bool>>(
+            ConfigManager::Instance().GetDeviceSettings(controller.bleAddress).useRawVibration);
 
         if (type == ControllerType::ProController) {
             controller.inputChar.ValueChanged([ds4, swapFlag](GattCharacteristic const&, GattValueChangedEventArgs const& args) mutable {
@@ -684,12 +717,13 @@ public:
             EmitSound(controller.writeChar);
         }
 
-        proPlayers.push_back({ controller, ds4, type, nullptr, swapFlag, controller.bleAddress });
+        proPlayers.push_back({ controller, ds4, type, nullptr, swapFlag, rawVibFlag, controller.bleAddress });
 
         // Register vibration callback for pro/GC controller
         auto& pp = proPlayers.back();
         pp.vibCtx = std::make_unique<VibrationContext>();
         pp.vibCtx->writeChar = controller.writeChar;
+        pp.vibCtx->useRawVibration = rawVibFlag;
         vigem_target_ds4_register_notification(
             vigem.GetClient(), ds4, DS4VibrationCallback, pp.vibCtx.get());
 

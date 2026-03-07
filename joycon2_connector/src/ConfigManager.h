@@ -45,6 +45,7 @@ struct VibrationConfig {
 // Per-device settings (keyed by BLE address)
 struct DeviceSettings {
     bool swapABXY = false;  // Swap A⇄B / X⇄Y button positions
+    bool useRawVibration = true;  // true = raw motor control (0x5N), false = predefined samples (0x0A)
 };
 
 struct AppConfig {
@@ -133,7 +134,8 @@ inline std::string ConfigToJSON(const AppConfig& config) {
     oss << "  \"deviceSettings\": [\n";
     size_t dsIdx = 0;
     for (const auto& [addr, ds] : config.deviceSettings) {
-        oss << "    { \"addr\": \"" << addr << "\", \"swapABXY\": " << (ds.swapABXY ? "true" : "false") << " }";
+        oss << "    { \"addr\": \"" << addr << "\", \"swapABXY\": " << (ds.swapABXY ? "true" : "false")
+            << ", \"useRawVibration\": " << (ds.useRawVibration ? "true" : "false") << " }";
         if (dsIdx + 1 < config.deviceSettings.size()) oss << ",";
         oss << "\n";
         dsIdx++;
@@ -260,6 +262,7 @@ inline bool JSONToConfig(const std::string& json, AppConfig& config) {
                         uint64_t addr = std::stoull(addrStr);
                         DeviceSettings ds;
                         ds.swapABXY = ExtractJsonBool(dsObjStr, "swapABXY", false);
+                        ds.useRawVibration = ExtractJsonBool(dsObjStr, "useRawVibration", true);
                         config.deviceSettings[addr] = ds;
                     } catch (...) {}
                 }

@@ -96,6 +96,21 @@ inline void SendRawVibration(GattCharacteristic const& characteristic,
     // No sleep — raw vibration needs low latency
 }
 
+// Encode DS4 motor values into a 12-byte Switch 2 raw vibration payload.
+// The exact 12-byte format for Switch 2 HD Rumble is not yet fully reverse-engineered.
+// The critical fix is using the raw vibration channel (0x5N packet) instead of
+// predefined sound/haptic samples (cmd 0x0A), which cause audible beeping on Pro2.
+inline void EncodeVibrationPayload(uint8_t largeMotor, uint8_t smallMotor, uint8_t outData[12]) {
+    for (int i = 0; i < 12; ++i) outData[i] = 0;
+    // LargeMotor -> low-frequency rumble, SmallMotor -> high-frequency rumble.
+    // Place amplitude values at payload positions. This encoding may need
+    // refinement once the full Switch 2 vibration protocol is documented.
+    outData[0] = largeMotor;
+    outData[1] = smallMotor;
+    outData[2] = largeMotor;
+    outData[3] = smallMotor;
+}
+
 // Non-blocking versions for use inside BLE notification callbacks
 // Avoids blocking the callback thread which would freeze input processing
 inline void SetPlayerLEDsAsync(GattCharacteristic characteristic, uint8_t pattern) {
@@ -114,5 +129,15 @@ inline void EmitSoundAsync(GattCharacteristic characteristic) {
 inline void SendVibrationSampleAsync(GattCharacteristic characteristic, uint8_t sampleId) {
     std::thread([characteristic, sampleId]() {
         SendVibrationSample(characteristic, sampleId);
+    }).detach();
+}
+
+// Async raw vibration for use from ViGEm callbacks (avoids blocking callback thread)
+inline void SendRawVibrationAsync(GattCharacteristic characteristic,
+                                   bool enabled, const uint8_t vibData[12],
+                                   uint8_t sequenceCounter) {
+    std::vector<uint8_t> data(vibData, vibData + 12);
+    std::thread([characteristic, enabled, data, sequenceCounter]() {
+        SendRawVibration(characteristic, enabled, data.data(), sequenceCounter);
     }).detach();
 }
