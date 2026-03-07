@@ -88,6 +88,7 @@
     "settings_language_hint": "Select the interface language. Changes take effect immediately.",
     "settings_about": "About",
     "settings_about_desc": "Connect Switch 2 Joy-Con to PC, emulating DS4 gamepad via ViGEmBus",
+    "settings_about_author": "Maintained by Misaka 10571",
 
     "settings_minimize_to_tray": "Minimize to tray on close",
     "settings_minimize_to_tray_hint": "Minimize to system tray instead of exiting when closing the window",

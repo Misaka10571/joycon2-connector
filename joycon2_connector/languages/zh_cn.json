@@ -88,6 +88,7 @@
     "settings_language_hint": "选择界面显示语言，切换后立即生效",
     "settings_about": "关于",
     "settings_about_desc": "将 Switch 2 Joy-Con 连接至 PC，通过 ViGEmBus 模拟为 DS4 手柄",
+    "settings_about_author": "Maintained by Misaka 10571",
 
     "settings_minimize_to_tray": "关闭时最小化到托盘",
     "settings_minimize_to_tray_hint": "关闭窗口时最小化到系统托盘而非退出程序",

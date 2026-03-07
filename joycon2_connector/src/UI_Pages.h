@@ -152,6 +152,49 @@ inline bool IconButton(const char* id, float size = 0) {
     return result;
 }
 
+// Helper: Draw GitHub Invertocat mark icon — accurate SVG-path-based rendering.
+// Draws a filled circle with the Octocat body carved out as a concave polygon.
+// Body polygon points sampled from the official GitHub mark SVG path, normalized to [-1,1].
+inline void DrawGitHubMark(ImDrawList* dl, ImVec2 center, float radius, ImU32 color) {
+    // 78 body polygon points derived from the official GitHub Invertocat SVG path.
+    // Coordinate system: origin at circle center, range [-1,1] maps to circle radius.
+    static const float gh_body[][2] = {
+        {-0.316f,  0.949f}, {-0.263f,  0.938f}, {-0.248f,  0.902f}, {-0.248f,  0.839f},
+        {-0.248f,  0.733f}, {-0.390f,  0.742f}, {-0.487f,  0.712f}, {-0.546f,  0.663f},
+        {-0.576f,  0.618f}, {-0.585f,  0.599f}, {-0.628f,  0.514f}, {-0.698f,  0.450f},
+        {-0.728f,  0.397f}, {-0.691f,  0.389f}, {-0.602f,  0.423f}, {-0.538f,  0.493f},
+        {-0.463f,  0.574f}, {-0.381f,  0.601f}, {-0.304f,  0.595f}, {-0.247f,  0.576f},
+        {-0.227f,  0.503f}, {-0.183f,  0.442f}, {-0.250f,  0.432f}, {-0.316f,  0.418f},
+        {-0.379f,  0.397f}, {-0.439f,  0.368f}, {-0.494f,  0.329f}, {-0.542f,  0.280f},
+        {-0.582f,  0.219f}, {-0.613f,  0.144f}, {-0.632f,  0.054f}, {-0.639f, -0.052f},
+        {-0.633f, -0.125f}, {-0.613f, -0.196f}, {-0.580f, -0.262f}, {-0.535f, -0.320f},
+        {-0.555f, -0.409f}, {-0.551f, -0.499f}, {-0.526f, -0.585f}, {-0.510f, -0.587f},
+        {-0.460f, -0.582f}, {-0.374f, -0.553f}, {-0.251f, -0.483f}, {-0.180f, -0.499f},
+        {-0.109f, -0.510f}, {-0.037f, -0.516f}, { 0.036f, -0.516f}, { 0.108f, -0.510f},
+        { 0.179f, -0.499f}, { 0.250f, -0.483f}, { 0.373f, -0.553f}, { 0.459f, -0.582f},
+        { 0.509f, -0.587f}, { 0.525f, -0.585f}, { 0.550f, -0.499f}, { 0.554f, -0.409f},
+        { 0.534f, -0.320f}, { 0.579f, -0.262f}, { 0.612f, -0.196f}, { 0.631f, -0.125f},
+        { 0.637f, -0.052f}, { 0.630f,  0.054f}, { 0.611f,  0.144f}, { 0.581f,  0.219f},
+        { 0.541f,  0.280f}, { 0.493f,  0.329f}, { 0.438f,  0.367f}, { 0.378f,  0.396f},
+        { 0.314f,  0.417f}, { 0.248f,  0.432f}, { 0.181f,  0.441f}, { 0.235f,  0.527f},
+        { 0.249f,  0.627f}, { 0.249f,  0.751f}, { 0.249f,  0.846f}, { 0.249f,  0.902f},
+        { 0.264f,  0.942f}, { 0.318f,  0.948f},
+    };
+    static const int gh_body_count = sizeof(gh_body) / sizeof(gh_body[0]);
+
+    // 1) Outer filled circle
+    dl->AddCircleFilled(center, radius, color, 40);
+
+    // 2) Build the body polygon in screen coordinates, then carve it out
+    ImU32 bg = ImGui::GetColorU32(UITheme::SurfaceCard);
+    ImVec2 pts[80];  // slightly larger than gh_body_count
+    for (int i = 0; i < gh_body_count; i++) {
+        pts[i] = ImVec2(center.x + gh_body[i][0] * radius,
+                         center.y + gh_body[i][1] * radius);
+    }
+    dl->AddConcavePolyFilled(pts, gh_body_count, bg);
+}
+
 // Helper: Spinner animation
 inline void Spinner(const char* label, float radius, float thickness, ImU32 color) {
     ImGuiWindow* window = ImGui::GetCurrentWindow();
@@ -1193,6 +1236,46 @@ inline void RenderSettings() {
     ImGui::TextColored(UITheme::TextTertiary, "v%s", APP_VERSION);
     ImGui::Spacing();
     ImGui::TextColored(UITheme::TextTertiary, "%s", T("settings_about_desc"));
+
+    ImGui::Spacing();
+
+    // Author + GitHub icon on the same line
+    ImGui::TextColored(UITheme::TextSecondary, "%s", T("settings_about_author"));
+    ImGui::SameLine(0, S(8));
+
+    // GitHub icon button — MD3 tonal icon button style (small circle)
+    {
+        float btnSize = S(28);
+        float iconR = S(10);
+        ImVec2 cursor = ImGui::GetCursorScreenPos();
+        // Vertically center with the text line
+        float textH = ImGui::CalcTextSize(T("settings_about_author")).y;
+        float offsetY = (textH - btnSize) * 0.5f;
+        ImVec2 btnPos = ImVec2(cursor.x, cursor.y + offsetY);
+
+        ImGui::SetCursorScreenPos(btnPos);
+        ImGui::InvisibleButton("##github_icon", ImVec2(btnSize, btnSize));
+        bool hovered = ImGui::IsItemHovered();
+        bool clicked = ImGui::IsItemClicked();
+
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        ImVec2 iconCenter = ImVec2(btnPos.x + btnSize * 0.5f, btnPos.y + btnSize * 0.5f);
+
+        // Draw the GitHub mark
+        ImVec4 fgColor = hovered ? UITheme::Primary : UITheme::TextSecondary;
+        DrawGitHubMark(dl, iconCenter, iconR, ImGui::GetColorU32(fgColor));
+
+        // Tooltip on hover
+        if (hovered) {
+            ImGui::SetTooltip("GitHub");
+        }
+
+        if (clicked) {
+            ShellExecuteW(nullptr, L"open",
+                L"https://github.com/Misaka10571/joycon2-connector",
+                nullptr, nullptr, SW_SHOWNORMAL);
+        }
+    }
 
     EndCard();
 
