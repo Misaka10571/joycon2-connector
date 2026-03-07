@@ -41,6 +41,12 @@ inline int g_selectedLayoutIndex = 0;
 inline char g_layoutNameBuf[128] = {};
 inline bool g_renamingLayout = false;
 
+// Xbox emulation warning popup state
+static bool g_xboxWarningPopupOpen = false;
+static uint64_t g_xboxWarningBleAddress = 0;  // BLE address of controller being toggled
+static int g_xboxWarningPlayerType = 0;  // 0=single, 1=dual, 2=pro
+static int g_xboxWarningPlayerIndex = 0; // index within the player type vector
+
 // Helper: Draw a card background with built-in padding
 inline void BeginCard(float width = 0, float minHeight = 0) {
     ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, S(12));
@@ -410,7 +416,7 @@ inline void RenderDashboard() {
             ImGui::BeginGroup();
             ImGui::Text("%s %d - %s", T("dash_player"), playerIndex, T("type_single_joycon"));
             ImGui::TextColored(UITheme::TextSecondary, "%s  |  %s: %s",
-                T("dash_mapping"),
+                p.isXboxMode ? T("dash_mapping_xbox") : T("dash_mapping_ds4"),
                 p.side == JoyConSide::Left ? T("dash_side_left") : T("dash_side_right"),
                 p.orientation == JoyConOrientation::Upright ? T("dash_orient_upright") : T("dash_orient_sideways"));
             if (p.mouseMode > 0) {
@@ -419,16 +425,13 @@ inline void RenderDashboard() {
             }
             ImGui::EndGroup();
 
-            // Right-aligned buttons: settings (for right upright only) + disconnect
-            bool showSettings = (p.side == JoyConSide::Right && p.orientation == JoyConOrientation::Upright);
-            float buttonsWidth = S(80) + (showSettings ? S(48) : 0);
+            // Right-aligned buttons: settings + disconnect
+            float buttonsWidth = S(80) + S(48);
             ImGui::SameLine(ImGui::GetContentRegionAvail().x - buttonsWidth);
-            if (showSettings) {
-                if (IconButton("singleSettings")) {
-                    ImGui::OpenPopup("SingleJoyConSettings");
-                }
-                ImGui::SameLine();
+            if (IconButton("singleSettings")) {
+                ImGui::OpenPopup("SingleJoyConSettings");
             }
+            ImGui::SameLine();
             if (DangerButton(T("dash_disconnect"))) {
                 pm.RemovePlayerByGlobalIndex(i);
                 ImGui::PopID();
@@ -437,23 +440,41 @@ inline void RenderDashboard() {
             }
 
             // Settings popup
-            if (showSettings) {
-                ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(S(16), S(12)));
-                ImGui::PushStyleVar(ImGuiStyleVar_PopupRounding, S(12));
-                if (ImGui::BeginPopup("SingleJoyConSettings")) {
-                    ImGui::TextColored(UITheme::TextSecondary, "%s", T("dash_settings"));
-                    ImGui::Spacing();
-                    bool swap = p.swapABXY;
-                    if (ImGui::Checkbox(T("dash_swap_abxy"), &swap)) {
-                        p.swapABXY = swap;
-                        ConfigManager::Instance().GetDeviceSettings(p.bleAddress).swapABXY = swap;
+            ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(S(16), S(12)));
+            ImGui::PushStyleVar(ImGuiStyleVar_PopupRounding, S(12));
+            if (ImGui::BeginPopup("SingleJoyConSettings")) {
+                ImGui::TextColored(UITheme::TextSecondary, "%s", T("dash_settings"));
+                ImGui::Spacing();
+                bool swap = p.swapABXY;
+                if (ImGui::Checkbox(T("dash_swap_abxy"), &swap)) {
+                    p.swapABXY = swap;
+                    ConfigManager::Instance().GetDeviceSettings(p.bleAddress).swapABXY = swap;
+                    ConfigManager::Instance().Save();
+                }
+                ImGui::TextColored(UITheme::TextTertiary, "%s", T("dash_swap_abxy_hint"));
+
+                ImGui::Spacing();
+                ImGui::Separator();
+                ImGui::Spacing();
+
+                // Xbox emulation toggle
+                bool xbox = ConfigManager::Instance().GetDeviceSettings(p.bleAddress).useXboxEmulation;
+                if (ImGui::Checkbox(T("dash_xbox_emulation"), &xbox)) {
+                    if (xbox && !ConfigManager::Instance().config.suppressXboxWarning) {
+                        g_xboxWarningPopupOpen = true;
+                        g_xboxWarningBleAddress = p.bleAddress;
+                        g_xboxWarningPlayerType = 0;
+                        g_xboxWarningPlayerIndex = i;
+                        ImGui::OpenPopup("##XboxWarning");
+                    } else {
+                        ConfigManager::Instance().GetDeviceSettings(p.bleAddress).useXboxEmulation = xbox;
                         ConfigManager::Instance().Save();
                     }
-                    ImGui::TextColored(UITheme::TextTertiary, "%s", T("dash_swap_abxy_hint"));
-                    ImGui::EndPopup();
                 }
-                ImGui::PopStyleVar(2);
+                ImGui::TextColored(UITheme::TextTertiary, "%s", T("dash_xbox_emulation_hint"));
+                ImGui::EndPopup();
             }
+            ImGui::PopStyleVar(2);
 
             EndCard();
             ImGui::PopID();
@@ -477,7 +498,9 @@ inline void RenderDashboard() {
             const char* gyroName = T("dash_gyro_both");
             if (p->gyroSource == GyroSource::Left) gyroName = T("dash_gyro_left");
             else if (p->gyroSource == GyroSource::Right) gyroName = T("dash_gyro_right");
-            ImGui::TextColored(UITheme::TextSecondary, "%s  |  %s: %s", T("dash_mapping"), T("dash_gyro_source"), gyroName);
+            ImGui::TextColored(UITheme::TextSecondary, "%s  |  %s: %s",
+                p->isXboxMode ? T("dash_mapping_xbox") : T("dash_mapping_ds4"),
+                T("dash_gyro_source"), gyroName);
             ImGui::EndGroup();
 
             float dualButtonsWidth = S(80) + S(48);
@@ -507,6 +530,26 @@ inline void RenderDashboard() {
                     ConfigManager::Instance().Save();
                 }
                 ImGui::TextColored(UITheme::TextTertiary, "%s", T("dash_swap_abxy_hint"));
+
+                ImGui::Spacing();
+                ImGui::Separator();
+                ImGui::Spacing();
+
+                // Xbox emulation toggle
+                bool xbox = ConfigManager::Instance().GetDeviceSettings(p->bleAddress).useXboxEmulation;
+                if (ImGui::Checkbox(T("dash_xbox_emulation"), &xbox)) {
+                    if (xbox && !ConfigManager::Instance().config.suppressXboxWarning) {
+                        g_xboxWarningPopupOpen = true;
+                        g_xboxWarningBleAddress = p->bleAddress;
+                        g_xboxWarningPlayerType = 1;
+                        g_xboxWarningPlayerIndex = i;
+                        ImGui::OpenPopup("##XboxWarning");
+                    } else {
+                        ConfigManager::Instance().GetDeviceSettings(p->bleAddress).useXboxEmulation = xbox;
+                        ConfigManager::Instance().Save();
+                    }
+                }
+                ImGui::TextColored(UITheme::TextTertiary, "%s", T("dash_xbox_emulation_hint"));
                 ImGui::EndPopup();
             }
             ImGui::PopStyleVar(2);
@@ -531,7 +574,8 @@ inline void RenderDashboard() {
             ImGui::BeginGroup();
             const char* typeName = (p.type == ControllerType::ProController) ? T("type_pro") : T("type_nso_gc");
             ImGui::Text("%s %d - %s", T("dash_player"), playerIndex, typeName);
-            ImGui::TextColored(UITheme::TextSecondary, "%s", T("dash_mapping"));
+            ImGui::TextColored(UITheme::TextSecondary, "%s",
+                p.isXboxModeFlag->load(std::memory_order_relaxed) ? T("dash_mapping_xbox") : T("dash_mapping_ds4"));
             if (p.type == ControllerType::ProController) {
                 auto& config = ConfigManager::Instance().config.proConfig;
                 if (!config.layouts.empty()) {
@@ -589,6 +633,26 @@ inline void RenderDashboard() {
                 }
                 ImGui::TextColored(UITheme::TextTertiary, "%s", T("dash_raw_vibration_hint"));
 
+                ImGui::Spacing();
+                ImGui::Separator();
+                ImGui::Spacing();
+
+                // Xbox emulation toggle
+                bool xbox = ConfigManager::Instance().GetDeviceSettings(p.bleAddress).useXboxEmulation;
+                if (ImGui::Checkbox(T("dash_xbox_emulation"), &xbox)) {
+                    if (xbox && !ConfigManager::Instance().config.suppressXboxWarning) {
+                        g_xboxWarningPopupOpen = true;
+                        g_xboxWarningBleAddress = p.bleAddress;
+                        g_xboxWarningPlayerType = 2;
+                        g_xboxWarningPlayerIndex = i;
+                        ImGui::OpenPopup("##XboxWarning");
+                    } else {
+                        ConfigManager::Instance().GetDeviceSettings(p.bleAddress).useXboxEmulation = xbox;
+                        ConfigManager::Instance().Save();
+                    }
+                }
+                ImGui::TextColored(UITheme::TextTertiary, "%s", T("dash_xbox_emulation_hint"));
+
                 ImGui::EndPopup();
             }
             ImGui::PopStyleVar(2);
@@ -599,6 +663,74 @@ inline void RenderDashboard() {
             playerIndex++;
         }
     }
+
+    // ---- Xbox emulation warning modal ----
+    if (g_xboxWarningPopupOpen) {
+        ImGui::OpenPopup("##XboxWarning");
+    }
+
+    ImVec2 xboxWarnCenter = ImGui::GetMainViewport()->GetCenter();
+    ImGui::SetNextWindowPos(xboxWarnCenter, ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+    ImGui::SetNextWindowSize(ImVec2(S(420), 0));
+
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(S(24), S(20)));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, S(16));
+    ImGui::PushStyleColor(ImGuiCol_PopupBg, UITheme::SurfaceCard);
+
+    if (ImGui::BeginPopupModal("##XboxWarning", nullptr,
+        ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_AlwaysAutoResize))
+    {
+        // Title
+        ImGui::PushFont(ImGui::GetIO().Fonts->Fonts.Size > 1 ? ImGui::GetIO().Fonts->Fonts[1] : nullptr);
+        ImGui::TextColored(UITheme::Primary, "%s", T("dash_xbox_warning_title"));
+        if (ImGui::GetIO().Fonts->Fonts.Size > 1) ImGui::PopFont();
+
+        ImGui::Spacing(); ImGui::Spacing();
+
+        ImGui::TextWrapped("%s", T("dash_xbox_warning_msg"));
+
+        ImGui::Spacing(); ImGui::Spacing();
+
+        // "Don't show again" checkbox
+        static bool suppressCheck = false;
+        ImGui::Checkbox(T("dash_xbox_warning_suppress"), &suppressCheck);
+
+        ImGui::Spacing(); ImGui::Spacing(); ImGui::Spacing();
+
+        // Buttons row — right-aligned
+        float btnWidth1 = ImGui::CalcTextSize(T("dash_xbox_warning_confirm")).x + S(48);
+        float btnWidth2 = ImGui::CalcTextSize(T("dash_xbox_warning_cancel")).x + S(48);
+        float totalWidth = btnWidth1 + btnWidth2 + S(12);
+        float availWidth = ImGui::GetContentRegionAvail().x;
+        if (totalWidth < availWidth) {
+            ImGui::SetCursorPosX(ImGui::GetCursorPosX() + availWidth - totalWidth);
+        }
+
+        if (SecondaryButton(T("dash_xbox_warning_cancel"))) {
+            g_xboxWarningPopupOpen = false;
+            suppressCheck = false;
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::SameLine(0, S(12));
+        if (PrimaryButton(T("dash_xbox_warning_confirm"))) {
+            // Save suppress preference
+            if (suppressCheck) {
+                ConfigManager::Instance().config.suppressXboxWarning = true;
+            }
+            // Apply Xbox emulation setting
+            ConfigManager::Instance().GetDeviceSettings(g_xboxWarningBleAddress).useXboxEmulation = true;
+            ConfigManager::Instance().Save();
+
+            g_xboxWarningPopupOpen = false;
+            suppressCheck = false;
+            ImGui::CloseCurrentPopup();
+        }
+
+        ImGui::EndPopup();
+    }
+
+    ImGui::PopStyleColor();
+    ImGui::PopStyleVar(2);
 
     ImGui::EndChild();
 }

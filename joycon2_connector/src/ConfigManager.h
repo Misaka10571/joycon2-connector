@@ -46,6 +46,7 @@ struct VibrationConfig {
 struct DeviceSettings {
     bool swapABXY = false;  // Swap A⇄B / X⇄Y button positions
     bool useRawVibration = true;  // true = raw motor control (0x5N), false = predefined samples (0x0A)
+    bool useXboxEmulation = false;  // true = emulate Xbox 360 controller instead of DS4
 };
 
 struct AppConfig {
@@ -56,6 +57,7 @@ struct AppConfig {
     std::map<uint64_t, DeviceSettings> deviceSettings;  // per-device settings, keyed by BLE address
     bool minimizeToTray = false;  // Minimize to system tray on close instead of exiting
     bool autoCheckUpdate = false;  // Auto check for updates on startup (default off)
+    bool suppressXboxWarning = false;  // Don't show Xbox emulation gyro warning
 };
 
 // Button mapping string conversion helpers
@@ -135,11 +137,13 @@ inline std::string ConfigToJSON(const AppConfig& config) {
     oss << "  \"language\": \"" << config.language << "\",\n";
     oss << "  \"minimizeToTray\": " << (config.minimizeToTray ? "true" : "false") << ",\n";
     oss << "  \"autoCheckUpdate\": " << (config.autoCheckUpdate ? "true" : "false") << ",\n";
+    oss << "  \"suppressXboxWarning\": " << (config.suppressXboxWarning ? "true" : "false") << ",\n";
     oss << "  \"deviceSettings\": [\n";
     size_t dsIdx = 0;
     for (const auto& [addr, ds] : config.deviceSettings) {
         oss << "    { \"addr\": \"" << addr << "\", \"swapABXY\": " << (ds.swapABXY ? "true" : "false")
-            << ", \"useRawVibration\": " << (ds.useRawVibration ? "true" : "false") << " }";
+            << ", \"useRawVibration\": " << (ds.useRawVibration ? "true" : "false")
+            << ", \"useXboxEmulation\": " << (ds.useXboxEmulation ? "true" : "false") << " }";
         if (dsIdx + 1 < config.deviceSettings.size()) oss << ",";
         oss << "\n";
         dsIdx++;
@@ -255,6 +259,9 @@ inline bool JSONToConfig(const std::string& json, AppConfig& config) {
     // Parse autoCheckUpdate
     config.autoCheckUpdate = ExtractJsonBool(json, "autoCheckUpdate", false);
 
+    // Parse suppressXboxWarning
+    config.suppressXboxWarning = ExtractJsonBool(json, "suppressXboxWarning", false);
+
     // Parse per-device settings
     config.deviceSettings.clear();
     auto dsPos = json.find("\"deviceSettings\"");
@@ -275,6 +282,7 @@ inline bool JSONToConfig(const std::string& json, AppConfig& config) {
                         DeviceSettings ds;
                         ds.swapABXY = ExtractJsonBool(dsObjStr, "swapABXY", false);
                         ds.useRawVibration = ExtractJsonBool(dsObjStr, "useRawVibration", true);
+                        ds.useXboxEmulation = ExtractJsonBool(dsObjStr, "useXboxEmulation", false);
                         config.deviceSettings[addr] = ds;
                     } catch (...) {}
                 }

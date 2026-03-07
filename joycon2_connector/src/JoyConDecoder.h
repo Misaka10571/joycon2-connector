@@ -27,6 +27,12 @@ DS4_REPORT_EX GenerateDualJoyConDS4Report(const std::vector<uint8_t>& leftBuffer
 DS4_REPORT_EX GenerateProControllerReport(const std::vector<uint8_t>& buffer);
 DS4_REPORT_EX GenerateNSOGCReport(const std::vector<uint8_t>& buffer);
 
+// Xbox 360 (XUSB) report generators — no gyro or touchpad
+XUSB_REPORT GenerateXUSBReport(const std::vector<uint8_t>& buffer, JoyConSide side, JoyConOrientation orientation);
+XUSB_REPORT GenerateDualJoyConXUSBReport(const std::vector<uint8_t>& leftBuffer, const std::vector<uint8_t>& rightBuffer);
+XUSB_REPORT GenerateProControllerXUSBReport(const std::vector<uint8_t>& buffer);
+XUSB_REPORT GenerateNSOGCXUSBReport(const std::vector<uint8_t>& buffer);
+
 uint32_t ExtractButtonState(const std::vector<uint8_t>& buffer);
 std::pair<int16_t, int16_t> GetRawOpticalMouse(const std::vector<uint8_t>& buffer);
 StickData DecodeJoystick(const std::vector<uint8_t>& buffer, JoyConSide side, JoyConOrientation orientation);
@@ -47,4 +53,18 @@ inline void ApplyABXYSwap(DS4_REPORT_EX& report) {
     if (hasCircle)   report.Report.wButtons |= DS4_BUTTON_CROSS;
     if (hasSquare)   report.Report.wButtons |= DS4_BUTTON_TRIANGLE;
     if (hasTriangle) report.Report.wButtons |= DS4_BUTTON_SQUARE;
+}
+
+// Post-process an XUSB report to swap A⇄B and X⇄Y
+inline void ApplyABXYSwapXUSB(XUSB_REPORT& report) {
+    USHORT oldButtons = report.wButtons;
+    bool hasA = (oldButtons & XUSB_GAMEPAD_A) != 0;
+    bool hasB = (oldButtons & XUSB_GAMEPAD_B) != 0;
+    bool hasX = (oldButtons & XUSB_GAMEPAD_X) != 0;
+    bool hasY = (oldButtons & XUSB_GAMEPAD_Y) != 0;
+    report.wButtons &= ~(XUSB_GAMEPAD_A | XUSB_GAMEPAD_B | XUSB_GAMEPAD_X | XUSB_GAMEPAD_Y);
+    if (hasA) report.wButtons |= XUSB_GAMEPAD_B;
+    if (hasB) report.wButtons |= XUSB_GAMEPAD_A;
+    if (hasX) report.wButtons |= XUSB_GAMEPAD_Y;
+    if (hasY) report.wButtons |= XUSB_GAMEPAD_X;
 }

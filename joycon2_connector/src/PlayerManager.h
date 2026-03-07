@@ -117,6 +117,82 @@ inline VOID CALLBACK DS4VibrationCallback(
     }
 }
 
+// ViGEm Xbox 360 vibration notification callback (runs on ViGEm worker thread)
+inline VOID CALLBACK X360VibrationCallback(
+    PVIGEM_CLIENT /*Client*/,
+    PVIGEM_TARGET /*Target*/,
+    UCHAR LargeMotor,
+    UCHAR SmallMotor,
+    UCHAR /*LedNumber*/,
+    LPVOID UserData)
+{
+    auto* ctx = static_cast<VibrationContext*>(UserData);
+    if (!ctx) return;
+
+    auto& vibConfig = ConfigManager::Instance().config.vibrationConfig;
+    if (!vibConfig.enabled) return;
+
+    auto now = std::chrono::steady_clock::now();
+    auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - ctx->lastSendTime).count();
+    if (elapsed < VibrationContext::MIN_INTERVAL_MS) return;
+
+    float scaledLarge = LargeMotor * vibConfig.intensity;
+    float scaledSmall = SmallMotor * vibConfig.intensity;
+    uint8_t motorL = static_cast<uint8_t>((std::min)(scaledLarge, 255.0f));
+    uint8_t motorR = static_cast<uint8_t>((std::min)(scaledSmall, 255.0f));
+
+    bool rawMode = ctx->useRawVibration && ctx->useRawVibration->load(std::memory_order_relaxed);
+
+    if (rawMode) {
+        if (motorL == ctx->lastMotorL && motorR == ctx->lastMotorR) return;
+        ctx->lastMotorL = motorL;
+        ctx->lastMotorR = motorR;
+        ctx->lastSendTime = now;
+
+        bool vibEnabled = (motorL > 0 || motorR > 0);
+        uint8_t seq = ctx->sequenceCounter++;
+
+        if (ctx->isDual) {
+            uint8_t leftData[12], rightData[12];
+            EncodeVibrationPayload(motorL, 0, leftData);
+            EncodeVibrationPayload(0, motorR, rightData);
+            if (ctx->writeCharLeft)
+                SendRawVibrationAsync(ctx->writeCharLeft, motorL > 0, leftData, seq);
+            if (ctx->writeCharRight)
+                SendRawVibrationAsync(ctx->writeCharRight, motorR > 0, rightData, seq);
+        } else {
+            uint8_t vibData[12];
+            EncodeVibrationPayload(motorL, motorR, vibData);
+            if (ctx->writeChar)
+                SendRawVibrationAsync(ctx->writeChar, vibEnabled, vibData, seq);
+        }
+    } else {
+        uint8_t sample;
+        if (motorL == 0 && motorR == 0) sample = VIB_NONE;
+        else if (motorL > 180 || motorR > 180) sample = VIB_BUZZ;
+        else if (motorL > 80 || motorR > 80) sample = VIB_STRONG_THUNK;
+        else sample = VIB_DUN;
+
+        if (sample == ctx->lastSample && sample != VIB_NONE) return;
+        ctx->lastSample = sample;
+        ctx->lastSendTime = now;
+
+        if (ctx->isDual) {
+            if (ctx->writeCharLeft && motorL > 0)
+                SendVibrationSampleAsync(ctx->writeCharLeft, sample);
+            if (ctx->writeCharRight && motorR > 0)
+                SendVibrationSampleAsync(ctx->writeCharRight, sample);
+            if (motorL == 0 && motorR == 0) {
+                if (ctx->writeCharLeft)  SendVibrationSampleAsync(ctx->writeCharLeft, VIB_NONE);
+                if (ctx->writeCharRight) SendVibrationSampleAsync(ctx->writeCharRight, VIB_NONE);
+            }
+        } else {
+            if (ctx->writeChar)
+                SendVibrationSampleAsync(ctx->writeChar, sample);
+        }
+    }
+}
+
 enum class ControllerType {
     SingleJoyCon = 1,
     DualJoyCon = 2,
@@ -138,6 +214,7 @@ struct SingleJoyConPlayer {
     JoyConOrientation orientation;
     // Per-device settings
     bool swapABXY = false;
+    bool isXboxMode = false;
     uint64_t bleAddress = 0;
     // Mouse State
     int mouseMode = 0;
@@ -183,7 +260,8 @@ struct SingleJoyConPlayer {
           newReportReady(o.newReportReady.load()), mouseInterpolActive(o.mouseInterpolActive.load()),
           lastBLETimestamp(o.lastBLETimestamp),
           reportIntervalMs(o.reportIntervalMs.load()),
-          bleTimestampInitialized(o.bleTimestampInitialized) {}
+          bleTimestampInitialized(o.bleTimestampInitialized),
+          isXboxMode(o.isXboxMode) {}
     SingleJoyConPlayer& operator=(SingleJoyConPlayer&& o) noexcept {
         if (this != &o) {
             joycon = std::move(o.joycon); ds4Controller = o.ds4Controller;
@@ -200,6 +278,7 @@ struct SingleJoyConPlayer {
             lastBLETimestamp = o.lastBLETimestamp;
             reportIntervalMs.store(o.reportIntervalMs.load());
             bleTimestampInitialized = o.bleTimestampInitialized;
+            isXboxMode = o.isXboxMode;
         }
         return *this;
     }
@@ -214,6 +293,7 @@ struct DualJoyConPlayer {
     PVIGEM_TARGET ds4Controller = nullptr;
     // Per-device settings
     bool swapABXY = false;
+    bool isXboxMode = false;
     uint64_t bleAddress = 0;  // uses right JoyCon's BLE address
     std::atomic<bool> running{ false };
     std::thread updateThread;
@@ -232,6 +312,7 @@ struct ProControllerPlayer {
     // Per-device settings
     std::shared_ptr<std::atomic<bool>> swapABXYFlag = std::make_shared<std::atomic<bool>>(false);
     std::shared_ptr<std::atomic<bool>> useRawVibrationFlag = std::make_shared<std::atomic<bool>>(true);
+    std::shared_ptr<std::atomic<bool>> isXboxModeFlag = std::make_shared<std::atomic<bool>>(false);
     uint64_t bleAddress = 0;
 };
 
@@ -266,6 +347,52 @@ inline void SendKeyboardInput(WORD virtualKey, bool keyDown) {
     input.ki.wVk = virtualKey;
     input.ki.dwFlags = keyDown ? 0 : KEYEVENTF_KEYUP;
     SendInput(1, &input, sizeof(INPUT));
+}
+
+// Xbox 360 (XUSB) button mapping application
+inline void ApplyButtonMappingXUSB(XUSB_REPORT& report, ButtonMapping mapping) {
+    switch (mapping) {
+    case ButtonMapping::L3:     report.wButtons |= XUSB_GAMEPAD_LEFT_THUMB; break;
+    case ButtonMapping::R3:     report.wButtons |= XUSB_GAMEPAD_RIGHT_THUMB; break;
+    case ButtonMapping::L1:     report.wButtons |= XUSB_GAMEPAD_LEFT_SHOULDER; break;
+    case ButtonMapping::R1:     report.wButtons |= XUSB_GAMEPAD_RIGHT_SHOULDER; break;
+    case ButtonMapping::L2:     report.bLeftTrigger = 255; break;
+    case ButtonMapping::R2:     report.bRightTrigger = 255; break;
+    case ButtonMapping::CROSS:  report.wButtons |= XUSB_GAMEPAD_A; break;
+    case ButtonMapping::CIRCLE: report.wButtons |= XUSB_GAMEPAD_B; break;
+    case ButtonMapping::SQUARE: report.wButtons |= XUSB_GAMEPAD_X; break;
+    case ButtonMapping::TRIANGLE: report.wButtons |= XUSB_GAMEPAD_Y; break;
+    case ButtonMapping::SHARE:  report.wButtons |= XUSB_GAMEPAD_BACK; break;
+    case ButtonMapping::OPTIONS:report.wButtons |= XUSB_GAMEPAD_START; break;
+    case ButtonMapping::DPAD_UP:    report.wButtons |= XUSB_GAMEPAD_DPAD_UP; break;
+    case ButtonMapping::DPAD_DOWN:  report.wButtons |= XUSB_GAMEPAD_DPAD_DOWN; break;
+    case ButtonMapping::DPAD_LEFT:  report.wButtons |= XUSB_GAMEPAD_DPAD_LEFT; break;
+    case ButtonMapping::DPAD_RIGHT: report.wButtons |= XUSB_GAMEPAD_DPAD_RIGHT; break;
+    default: break;
+    }
+}
+
+// GL/GR application for Pro controllers (Xbox 360 mode)
+inline void ApplyGLGRMappingsXUSB(XUSB_REPORT& report, const std::vector<uint8_t>& buffer) {
+    if (buffer.size() < 9) return;
+    auto& config = ConfigManager::Instance().config.proConfig;
+    if (config.layouts.empty()) return;
+
+    int layoutIndex = config.activeLayoutIndex;
+    if (layoutIndex < 0 || layoutIndex >= static_cast<int>(config.layouts.size())) {
+        layoutIndex = 0;
+        config.activeLayoutIndex = 0;
+    }
+
+    const GLGRLayout& activeLayout = config.layouts[layoutIndex];
+    uint64_t state = 0;
+    for (int i = 3; i <= 8; ++i) state = (state << 8) | buffer[i];
+
+    constexpr uint64_t BUTTON_GL_MASK = 0x000000000200;
+    constexpr uint64_t BUTTON_GR_MASK = 0x000000000100;
+
+    if (state & BUTTON_GL_MASK) ApplyButtonMappingXUSB(report, activeLayout.glMapping);
+    if (state & BUTTON_GR_MASK) ApplyButtonMappingXUSB(report, activeLayout.grMapping);
 }
 
 // GL/GR application for Pro controllers
@@ -350,20 +477,28 @@ public:
     // Add a Single JoyCon player from async scan result
     bool AddSingleJoyCon(ConnectedJoyCon cj, JoyConSide side, JoyConOrientation orientation) {
         auto& vigem = ViGEmManager::Instance();
-        PVIGEM_TARGET ds4 = vigem.AllocDS4();
-        if (!ds4 || !vigem.AddTarget(ds4)) return false;
+        bool xboxMode = ConfigManager::Instance().GetDeviceSettings(cj.bleAddress).useXboxEmulation;
 
-        singlePlayers.push_back(std::make_unique<SingleJoyConPlayer>(cj, ds4, side, orientation));
+        PVIGEM_TARGET target = xboxMode ? vigem.AllocX360() : vigem.AllocDS4();
+        if (!target || !vigem.AddTarget(target)) return false;
+
+        singlePlayers.push_back(std::make_unique<SingleJoyConPlayer>(cj, target, side, orientation));
         auto& player = *singlePlayers.back();
         player.bleAddress = cj.bleAddress;
         player.swapABXY = ConfigManager::Instance().GetDeviceSettings(cj.bleAddress).swapABXY;
+        player.isXboxMode = xboxMode;
         auto& mouseConfig = ConfigManager::Instance().config.mouseConfig;
 
         // Register vibration callback
         player.vibCtx = std::make_unique<VibrationContext>();
         player.vibCtx->writeChar = cj.writeChar;
-        vigem_target_ds4_register_notification(
-            vigem.GetClient(), ds4, DS4VibrationCallback, player.vibCtx.get());
+        if (xboxMode) {
+            vigem_target_x360_register_notification(
+                vigem.GetClient(), target, X360VibrationCallback, player.vibCtx.get());
+        } else {
+            vigem_target_ds4_register_notification(
+                vigem.GetClient(), target, DS4VibrationCallback, player.vibCtx.get());
+        }
 
         player.joycon.inputChar.ValueChanged(
             [joyconSide = player.side, joyconOrientation = player.orientation,
@@ -546,9 +681,15 @@ public:
                 }
             }
 
-            DS4_REPORT_EX report = GenerateDS4Report(buffer, joyconSide, joyconOrientation);
-            if (playerPtr->swapABXY) ApplyABXYSwap(report);
-            vigem_target_ds4_update_ex(ViGEmManager::Instance().GetClient(), playerPtr->ds4Controller, report);
+            if (playerPtr->isXboxMode) {
+                XUSB_REPORT xreport = GenerateXUSBReport(buffer, joyconSide, joyconOrientation);
+                if (playerPtr->swapABXY) ApplyABXYSwapXUSB(xreport);
+                vigem_target_x360_update(ViGEmManager::Instance().GetClient(), playerPtr->ds4Controller, xreport);
+            } else {
+                DS4_REPORT_EX report = GenerateDS4Report(buffer, joyconSide, joyconOrientation);
+                if (playerPtr->swapABXY) ApplyABXYSwap(report);
+                vigem_target_ds4_update_ex(ViGEmManager::Instance().GetClient(), playerPtr->ds4Controller, report);
+            }
         });
 
         auto status = player.joycon.inputChar.WriteClientCharacteristicConfigurationDescriptorAsync(
@@ -595,16 +736,19 @@ public:
         }
 
         auto& vigem = ViGEmManager::Instance();
-        PVIGEM_TARGET ds4 = vigem.AllocDS4();
-        if (!ds4 || !vigem.AddTarget(ds4)) return false;
+        bool xboxMode = ConfigManager::Instance().GetDeviceSettings(pendingDualRight.bleAddress).useXboxEmulation;
+
+        PVIGEM_TARGET target = xboxMode ? vigem.AllocX360() : vigem.AllocDS4();
+        if (!target || !vigem.AddTarget(target)) return false;
 
         auto dp = std::make_unique<DualJoyConPlayer>();
         dp->leftJoyCon = leftJoyCon;
         dp->rightJoyCon = pendingDualRight;
         dp->gyroSource = pendingDualGyro;
-        dp->ds4Controller = ds4;
+        dp->ds4Controller = target;
         dp->bleAddress = pendingDualRight.bleAddress;
         dp->swapABXY = ConfigManager::Instance().GetDeviceSettings(dp->bleAddress).swapABXY;
+        dp->isXboxMode = xboxMode;
         dp->running.store(true);
 
         // Register vibration callback for dual JoyCon
@@ -612,8 +756,13 @@ public:
         dp->vibCtx->isDual = true;
         dp->vibCtx->writeCharLeft = leftJoyCon.writeChar;
         dp->vibCtx->writeCharRight = pendingDualRight.writeChar;
-        vigem_target_ds4_register_notification(
-            vigem.GetClient(), ds4, DS4VibrationCallback, dp->vibCtx.get());
+        if (xboxMode) {
+            vigem_target_x360_register_notification(
+                vigem.GetClient(), target, X360VibrationCallback, dp->vibCtx.get());
+        } else {
+            vigem_target_ds4_register_notification(
+                vigem.GetClient(), target, DS4VibrationCallback, dp->vibCtx.get());
+        }
 
         dp->leftJoyCon.inputChar.ValueChanged([ptr = dp.get()](GattCharacteristic const&, GattValueChangedEventArgs const& args) {
             auto reader = DataReader::FromBuffer(args.CharacteristicValue());
@@ -653,9 +802,15 @@ public:
                 if (leftBuf == prevLeft && rightBuf == prevRight) continue;
                 prevLeft = leftBuf;
                 prevRight = rightBuf;
-                DS4_REPORT_EX report = GenerateDualJoyConDS4Report(*leftBuf, *rightBuf, ptr->gyroSource);
-                if (ptr->swapABXY) ApplyABXYSwap(report);
-                vigem_target_ds4_update_ex(ViGEmManager::Instance().GetClient(), ptr->ds4Controller, report);
+                if (ptr->isXboxMode) {
+                    XUSB_REPORT xreport = GenerateDualJoyConXUSBReport(*leftBuf, *rightBuf);
+                    if (ptr->swapABXY) ApplyABXYSwapXUSB(xreport);
+                    vigem_target_x360_update(ViGEmManager::Instance().GetClient(), ptr->ds4Controller, xreport);
+                } else {
+                    DS4_REPORT_EX report = GenerateDualJoyConDS4Report(*leftBuf, *rightBuf, ptr->gyroSource);
+                    if (ptr->swapABXY) ApplyABXYSwap(report);
+                    vigem_target_ds4_update_ex(ViGEmManager::Instance().GetClient(), ptr->ds4Controller, report);
+                }
             }
         });
 
@@ -667,44 +822,75 @@ public:
     // Add Pro Controller or NSO GC
     bool AddProOrGC(ConnectedJoyCon controller, ControllerType type) {
         auto& vigem = ViGEmManager::Instance();
-        PVIGEM_TARGET ds4 = vigem.AllocDS4();
-        if (!ds4 || !vigem.AddTarget(ds4)) return false;
+        bool xboxMode = ConfigManager::Instance().GetDeviceSettings(controller.bleAddress).useXboxEmulation;
+
+        PVIGEM_TARGET target = xboxMode ? vigem.AllocX360() : vigem.AllocDS4();
+        if (!target || !vigem.AddTarget(target)) return false;
 
         if (type == ControllerType::ProController) {
             ConfigManager::Instance().EnsureDefaults();
             ConfigManager::Instance().Save();
         }
 
-        // Create shared swap flag so BLE callback lambda can access it safely
+        // Create shared flags so BLE callback lambda can access them safely
         auto swapFlag = std::make_shared<std::atomic<bool>>(
             ConfigManager::Instance().GetDeviceSettings(controller.bleAddress).swapABXY);
         auto rawVibFlag = std::make_shared<std::atomic<bool>>(
             ConfigManager::Instance().GetDeviceSettings(controller.bleAddress).useRawVibration);
+        auto xboxModeFlag = std::make_shared<std::atomic<bool>>(xboxMode);
 
         if (type == ControllerType::ProController) {
-            controller.inputChar.ValueChanged([ds4, swapFlag](GattCharacteristic const&, GattValueChangedEventArgs const& args) mutable {
-                thread_local bool prioritySet = false;
-                if (!prioritySet) { SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL); prioritySet = true; }
-                auto reader = DataReader::FromBuffer(args.CharacteristicValue());
-                std::vector<uint8_t> buffer(reader.UnconsumedBufferLength());
-                reader.ReadBytes(buffer);
-                DS4_REPORT_EX report = GenerateProControllerReport(buffer);
-                ApplyGLGRMappings(report, buffer);
-                if (swapFlag->load(std::memory_order_relaxed)) ApplyABXYSwap(report);
-                HandleSpecialProButtons(buffer);
-                vigem_target_ds4_update_ex(ViGEmManager::Instance().GetClient(), ds4, report);
-            });
+            if (xboxMode) {
+                controller.inputChar.ValueChanged([target, swapFlag](GattCharacteristic const&, GattValueChangedEventArgs const& args) mutable {
+                    thread_local bool prioritySet = false;
+                    if (!prioritySet) { SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL); prioritySet = true; }
+                    auto reader = DataReader::FromBuffer(args.CharacteristicValue());
+                    std::vector<uint8_t> buffer(reader.UnconsumedBufferLength());
+                    reader.ReadBytes(buffer);
+                    XUSB_REPORT xreport = GenerateProControllerXUSBReport(buffer);
+                    ApplyGLGRMappingsXUSB(xreport, buffer);
+                    if (swapFlag->load(std::memory_order_relaxed)) ApplyABXYSwapXUSB(xreport);
+                    HandleSpecialProButtons(buffer);
+                    vigem_target_x360_update(ViGEmManager::Instance().GetClient(), target, xreport);
+                });
+            } else {
+                controller.inputChar.ValueChanged([target, swapFlag](GattCharacteristic const&, GattValueChangedEventArgs const& args) mutable {
+                    thread_local bool prioritySet = false;
+                    if (!prioritySet) { SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL); prioritySet = true; }
+                    auto reader = DataReader::FromBuffer(args.CharacteristicValue());
+                    std::vector<uint8_t> buffer(reader.UnconsumedBufferLength());
+                    reader.ReadBytes(buffer);
+                    DS4_REPORT_EX report = GenerateProControllerReport(buffer);
+                    ApplyGLGRMappings(report, buffer);
+                    if (swapFlag->load(std::memory_order_relaxed)) ApplyABXYSwap(report);
+                    HandleSpecialProButtons(buffer);
+                    vigem_target_ds4_update_ex(ViGEmManager::Instance().GetClient(), target, report);
+                });
+            }
         } else {
-            controller.inputChar.ValueChanged([ds4, swapFlag](GattCharacteristic const&, GattValueChangedEventArgs const& args) mutable {
-                thread_local bool prioritySet = false;
-                if (!prioritySet) { SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL); prioritySet = true; }
-                auto reader = DataReader::FromBuffer(args.CharacteristicValue());
-                std::vector<uint8_t> buffer(reader.UnconsumedBufferLength());
-                reader.ReadBytes(buffer);
-                DS4_REPORT_EX report = GenerateNSOGCReport(buffer);
-                if (swapFlag->load(std::memory_order_relaxed)) ApplyABXYSwap(report);
-                vigem_target_ds4_update_ex(ViGEmManager::Instance().GetClient(), ds4, report);
-            });
+            if (xboxMode) {
+                controller.inputChar.ValueChanged([target, swapFlag](GattCharacteristic const&, GattValueChangedEventArgs const& args) mutable {
+                    thread_local bool prioritySet = false;
+                    if (!prioritySet) { SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL); prioritySet = true; }
+                    auto reader = DataReader::FromBuffer(args.CharacteristicValue());
+                    std::vector<uint8_t> buffer(reader.UnconsumedBufferLength());
+                    reader.ReadBytes(buffer);
+                    XUSB_REPORT xreport = GenerateNSOGCXUSBReport(buffer);
+                    if (swapFlag->load(std::memory_order_relaxed)) ApplyABXYSwapXUSB(xreport);
+                    vigem_target_x360_update(ViGEmManager::Instance().GetClient(), target, xreport);
+                });
+            } else {
+                controller.inputChar.ValueChanged([target, swapFlag](GattCharacteristic const&, GattValueChangedEventArgs const& args) mutable {
+                    thread_local bool prioritySet = false;
+                    if (!prioritySet) { SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL); prioritySet = true; }
+                    auto reader = DataReader::FromBuffer(args.CharacteristicValue());
+                    std::vector<uint8_t> buffer(reader.UnconsumedBufferLength());
+                    reader.ReadBytes(buffer);
+                    DS4_REPORT_EX report = GenerateNSOGCReport(buffer);
+                    if (swapFlag->load(std::memory_order_relaxed)) ApplyABXYSwap(report);
+                    vigem_target_ds4_update_ex(ViGEmManager::Instance().GetClient(), target, report);
+                });
+            }
         }
 
         controller.inputChar.WriteClientCharacteristicConfigurationDescriptorAsync(
@@ -717,15 +903,20 @@ public:
             EmitSound(controller.writeChar);
         }
 
-        proPlayers.push_back({ controller, ds4, type, nullptr, swapFlag, rawVibFlag, controller.bleAddress });
+        proPlayers.push_back({ controller, target, type, nullptr, swapFlag, rawVibFlag, xboxModeFlag, controller.bleAddress });
 
         // Register vibration callback for pro/GC controller
         auto& pp = proPlayers.back();
         pp.vibCtx = std::make_unique<VibrationContext>();
         pp.vibCtx->writeChar = controller.writeChar;
         pp.vibCtx->useRawVibration = rawVibFlag;
-        vigem_target_ds4_register_notification(
-            vigem.GetClient(), ds4, DS4VibrationCallback, pp.vibCtx.get());
+        if (xboxMode) {
+            vigem_target_x360_register_notification(
+                vigem.GetClient(), target, X360VibrationCallback, pp.vibCtx.get());
+        } else {
+            vigem_target_ds4_register_notification(
+                vigem.GetClient(), target, DS4VibrationCallback, pp.vibCtx.get());
+        }
 
         return true;
     }
@@ -734,7 +925,10 @@ public:
     void RemovePlayerByGlobalIndex(int globalIdx) {
         int idx = globalIdx;
         if (idx < (int)singlePlayers.size()) {
-            vigem_target_ds4_unregister_notification(singlePlayers[idx]->ds4Controller);
+            if (singlePlayers[idx]->isXboxMode)
+                vigem_target_x360_unregister_notification(singlePlayers[idx]->ds4Controller);
+            else
+                vigem_target_ds4_unregister_notification(singlePlayers[idx]->ds4Controller);
             ViGEmManager::Instance().RemoveTarget(singlePlayers[idx]->ds4Controller);
             singlePlayers.erase(singlePlayers.begin() + idx);
             return;
@@ -743,14 +937,20 @@ public:
         if (idx < (int)dualPlayers.size()) {
             dualPlayers[idx]->running.store(false);
             if (dualPlayers[idx]->updateThread.joinable()) dualPlayers[idx]->updateThread.join();
-            vigem_target_ds4_unregister_notification(dualPlayers[idx]->ds4Controller);
+            if (dualPlayers[idx]->isXboxMode)
+                vigem_target_x360_unregister_notification(dualPlayers[idx]->ds4Controller);
+            else
+                vigem_target_ds4_unregister_notification(dualPlayers[idx]->ds4Controller);
             ViGEmManager::Instance().RemoveTarget(dualPlayers[idx]->ds4Controller);
             dualPlayers.erase(dualPlayers.begin() + idx);
             return;
         }
         idx -= (int)dualPlayers.size();
         if (idx < (int)proPlayers.size()) {
-            vigem_target_ds4_unregister_notification(proPlayers[idx].ds4Controller);
+            if (proPlayers[idx].isXboxModeFlag->load(std::memory_order_relaxed))
+                vigem_target_x360_unregister_notification(proPlayers[idx].ds4Controller);
+            else
+                vigem_target_ds4_unregister_notification(proPlayers[idx].ds4Controller);
             ViGEmManager::Instance().RemoveTarget(proPlayers[idx].ds4Controller);
             proPlayers.erase(proPlayers.begin() + idx);
             return;
@@ -765,17 +965,26 @@ public:
         for (auto& dp : dualPlayers) {
             dp->running.store(false);
             if (dp->updateThread.joinable()) dp->updateThread.join();
-            vigem_target_ds4_unregister_notification(dp->ds4Controller);
+            if (dp->isXboxMode)
+                vigem_target_x360_unregister_notification(dp->ds4Controller);
+            else
+                vigem_target_ds4_unregister_notification(dp->ds4Controller);
             ViGEmManager::Instance().RemoveTarget(dp->ds4Controller);
         }
         dualPlayers.clear();
         for (auto& sp : singlePlayers) {
-            vigem_target_ds4_unregister_notification(sp->ds4Controller);
+            if (sp->isXboxMode)
+                vigem_target_x360_unregister_notification(sp->ds4Controller);
+            else
+                vigem_target_ds4_unregister_notification(sp->ds4Controller);
             ViGEmManager::Instance().RemoveTarget(sp->ds4Controller);
         }
         singlePlayers.clear();
         for (auto& pp : proPlayers) {
-            vigem_target_ds4_unregister_notification(pp.ds4Controller);
+            if (pp.isXboxModeFlag->load(std::memory_order_relaxed))
+                vigem_target_x360_unregister_notification(pp.ds4Controller);
+            else
+                vigem_target_ds4_unregister_notification(pp.ds4Controller);
             ViGEmManager::Instance().RemoveTarget(pp.ds4Controller);
         }
         proPlayers.clear();

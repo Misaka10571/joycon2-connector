@@ -518,3 +518,202 @@ MotionData DecodeMotion(const std::vector<uint8_t>& buffer) {
     m.gyroZ  = to_signed_16(buffer[0x3A], buffer[0x3B]);
     return m;
 }
+
+// ============================================================
+// XUSB (Xbox 360) report generators — no gyro or touchpad
+// ============================================================
+
+XUSB_REPORT GenerateXUSBReport(const std::vector<uint8_t>& buffer, JoyConSide side, JoyConOrientation orientation) {
+    XUSB_REPORT report;
+    XUSB_REPORT_INIT(&report);
+
+    if (buffer.size() < 0x3C) return report;
+
+    bool isLeft = (side == JoyConSide::Left);
+    bool upright = (orientation == JoyConOrientation::Upright);
+
+    int btnOffset = isLeft ? 4 : 3;
+    uint32_t state = (buffer[btnOffset] << 16) | (buffer[btnOffset + 1] << 8) | buffer[btnOffset + 2];
+
+    auto stick = DecodeJoystick(buffer, side, orientation);
+
+    if (isLeft) {
+        if (state & BUTTON_UP_MASK_LEFT)     report.wButtons |= XUSB_GAMEPAD_DPAD_UP;
+        if (state & BUTTON_DOWN_MASK_LEFT)   report.wButtons |= XUSB_GAMEPAD_DPAD_DOWN;
+        if (state & BUTTON_LEFT_MASK_LEFT)   report.wButtons |= XUSB_GAMEPAD_DPAD_LEFT;
+        if (state & BUTTON_RIGHT_MASK_LEFT)  report.wButtons |= XUSB_GAMEPAD_DPAD_RIGHT;
+        if (state & BUTTON_MINUS_MASK_LEFT)  report.wButtons |= XUSB_GAMEPAD_BACK;
+        if (state & BUTTON_L_MASK_LEFT)      report.wButtons |= XUSB_GAMEPAD_LEFT_SHOULDER;
+        if (state & BUTTON_STICK_MASK_LEFT)  report.wButtons |= XUSB_GAMEPAD_LEFT_THUMB;
+    } else {
+        if (state & BUTTON_A_MASK_RIGHT)     report.wButtons |= XUSB_GAMEPAD_B;
+        if (state & BUTTON_B_MASK_RIGHT)     report.wButtons |= XUSB_GAMEPAD_A;
+        if (state & BUTTON_X_MASK_RIGHT)     report.wButtons |= XUSB_GAMEPAD_Y;
+        if (state & BUTTON_Y_MASK_RIGHT)     report.wButtons |= XUSB_GAMEPAD_X;
+        if (state & BUTTON_PLUS_MASK_RIGHT)  report.wButtons |= XUSB_GAMEPAD_START;
+        if (state & BUTTON_R_MASK_RIGHT)     report.wButtons |= XUSB_GAMEPAD_RIGHT_SHOULDER;
+        if (state & BUTTON_STICK_MASK_RIGHT) report.wButtons |= XUSB_GAMEPAD_RIGHT_THUMB;
+    }
+
+    BYTE leftTrigger = 0, rightTrigger = 0;
+    bool leftShoulder = false, rightShoulder = false;
+    decode_triggers_shoulders(state, isLeft, upright, leftTrigger, rightTrigger, leftShoulder, rightShoulder);
+
+    if (leftShoulder)  report.wButtons |= XUSB_GAMEPAD_LEFT_SHOULDER;
+    if (rightShoulder) report.wButtons |= XUSB_GAMEPAD_RIGHT_SHOULDER;
+    report.bLeftTrigger = leftTrigger;
+    report.bRightTrigger = rightTrigger;
+
+    report.sThumbLX = stick.x;
+    report.sThumbLY = -stick.y;  // XUSB Y axis: up is positive
+
+    return report;
+}
+
+XUSB_REPORT GenerateDualJoyConXUSBReport(const std::vector<uint8_t>& leftBuffer, const std::vector<uint8_t>& rightBuffer) {
+    XUSB_REPORT report;
+    XUSB_REPORT_INIT(&report);
+
+    if (leftBuffer.size() < 0x3C && rightBuffer.size() < 0x3C) return report;
+
+    // Generate individual reports and merge
+    XUSB_REPORT leftReport;
+    XUSB_REPORT_INIT(&leftReport);
+    if (leftBuffer.size() >= 0x3C) {
+        leftReport = GenerateXUSBReport(leftBuffer, JoyConSide::Left, JoyConOrientation::Upright);
+    }
+
+    XUSB_REPORT rightReport;
+    XUSB_REPORT_INIT(&rightReport);
+    if (rightBuffer.size() >= 0x3C) {
+        rightReport = GenerateXUSBReport(rightBuffer, JoyConSide::Right, JoyConOrientation::Upright);
+    }
+
+    // Combine buttons (XUSB dpad is bitmask, can just OR together)
+    report.wButtons = leftReport.wButtons | rightReport.wButtons;
+
+    // Triggers: left from left joycon, right from right joycon
+    uint32_t leftState = (leftBuffer.size() >= 7)
+        ? ((leftBuffer[4] << 16) | (leftBuffer[5] << 8) | leftBuffer[6])
+        : 0;
+    uint32_t rightState = (rightBuffer.size() >= 6)
+        ? ((rightBuffer[3] << 16) | (rightBuffer[4] << 8) | rightBuffer[5])
+        : 0;
+
+    BYTE lt = 0, rt = 0;
+    bool ls = false, rs = false;
+
+    decode_triggers_shoulders(leftState, true, true, lt, rt, ls, rs);
+    report.bLeftTrigger = lt;
+    if (ls) report.wButtons |= XUSB_GAMEPAD_LEFT_SHOULDER;
+    if (lt) report.wButtons |= XUSB_GAMEPAD_LEFT_SHOULDER;  // digital trigger
+
+    decode_triggers_shoulders(rightState, false, true, lt, rt, ls, rs);
+    report.bRightTrigger = rt;
+    if (rs) report.wButtons |= XUSB_GAMEPAD_RIGHT_SHOULDER;
+    if (rt) report.wButtons |= XUSB_GAMEPAD_RIGHT_SHOULDER;
+
+    // Left stick from left joycon, right stick from right joycon
+    report.sThumbLX = leftReport.sThumbLX;
+    report.sThumbLY = leftReport.sThumbLY;
+    report.sThumbRX = rightReport.sThumbLX;
+    report.sThumbRY = rightReport.sThumbLY;
+
+    return report;
+}
+
+XUSB_REPORT GenerateProControllerXUSBReport(const std::vector<uint8_t>& buffer) {
+    XUSB_REPORT report;
+    XUSB_REPORT_INIT(&report);
+
+    if (buffer.size() < 0x3C) return report;
+
+    uint64_t state = 0;
+    for (int i = 3; i <= 8; ++i) {
+        state = (state << 8) | buffer[i];
+    }
+
+    // Face buttons: Joy-Con A→Xbox B, B→A, X→Y, Y→X (Nintendo layout → Xbox layout)
+    if (state & BUTTON_A_MASK)        report.wButtons |= XUSB_GAMEPAD_B;
+    if (state & BUTTON_B_MASK)        report.wButtons |= XUSB_GAMEPAD_A;
+    if (state & BUTTON_X_MASK)        report.wButtons |= XUSB_GAMEPAD_Y;
+    if (state & BUTTON_Y_MASK)        report.wButtons |= XUSB_GAMEPAD_X;
+    if (state & BUTTON_L_SHOULDER)    report.wButtons |= XUSB_GAMEPAD_LEFT_SHOULDER;
+    if (state & BUTTON_R_SHOULDER)    report.wButtons |= XUSB_GAMEPAD_RIGHT_SHOULDER;
+    if (state & BUTTON_L_THUMB)       report.wButtons |= XUSB_GAMEPAD_LEFT_THUMB;
+    if (state & BUTTON_R_THUMB)       report.wButtons |= XUSB_GAMEPAD_RIGHT_THUMB;
+    if (state & BUTTON_BACK)          report.wButtons |= XUSB_GAMEPAD_BACK;
+    if (state & BUTTON_START)         report.wButtons |= XUSB_GAMEPAD_START;
+    if (state & BUTTON_GUIDE)         report.wButtons |= XUSB_GAMEPAD_GUIDE;
+
+    // D-Pad (XUSB uses bitmask, can combine freely)
+    if (state & BUTTON_DPAD_UP)       report.wButtons |= XUSB_GAMEPAD_DPAD_UP;
+    if (state & BUTTON_DPAD_DOWN)     report.wButtons |= XUSB_GAMEPAD_DPAD_DOWN;
+    if (state & BUTTON_DPAD_LEFT)     report.wButtons |= XUSB_GAMEPAD_DPAD_LEFT;
+    if (state & BUTTON_DPAD_RIGHT)    report.wButtons |= XUSB_GAMEPAD_DPAD_RIGHT;
+
+    // Triggers (digital → full press)
+    report.bLeftTrigger = (state & TRIGGER_LT_MASK) ? 255 : 0;
+    report.bRightTrigger = (state & TRIGGER_RT_MASK) ? 255 : 0;
+    if (state & TRIGGER_LT_MASK)      report.wButtons |= XUSB_GAMEPAD_LEFT_SHOULDER;
+    if (state & TRIGGER_RT_MASK)      report.wButtons |= XUSB_GAMEPAD_RIGHT_SHOULDER;
+
+    // Sticks (XUSB uses SHORT -32768..32767)
+    auto [lx, ly] = decode_pro_joystick(&buffer[10]);
+    auto [rx, ry] = decode_pro_joystick(&buffer[13]);
+
+    report.sThumbLX = lx;
+    report.sThumbLY = ly;   // decode_pro_joystick already has correct sign
+    report.sThumbRX = rx;
+    report.sThumbRY = ry;
+
+    return report;
+}
+
+XUSB_REPORT GenerateNSOGCXUSBReport(const std::vector<uint8_t>& buffer) {
+    XUSB_REPORT report;
+    XUSB_REPORT_INIT(&report);
+
+    if (buffer.size() < 0x3E) return report;
+
+    uint64_t state = 0;
+    for (int i = 3; i <= 8; ++i) {
+        state = (state << 8) | buffer[i];
+    }
+
+    // Face buttons
+    if (state & BUTTON_A_MASK)        report.wButtons |= XUSB_GAMEPAD_B;
+    if (state & BUTTON_B_MASK)        report.wButtons |= XUSB_GAMEPAD_A;
+    if (state & BUTTON_X_MASK)        report.wButtons |= XUSB_GAMEPAD_Y;
+    if (state & BUTTON_Y_MASK)        report.wButtons |= XUSB_GAMEPAD_X;
+    if (state & BUTTON_L_SHOULDER)    report.wButtons |= XUSB_GAMEPAD_LEFT_SHOULDER;
+    if (state & BUTTON_R_SHOULDER)    report.wButtons |= XUSB_GAMEPAD_RIGHT_SHOULDER;
+    if (state & BUTTON_L_THUMB)       report.wButtons |= XUSB_GAMEPAD_LEFT_THUMB;
+    if (state & BUTTON_R_THUMB)       report.wButtons |= XUSB_GAMEPAD_RIGHT_THUMB;
+    if (state & BUTTON_BACK)          report.wButtons |= XUSB_GAMEPAD_BACK;
+    if (state & BUTTON_START)         report.wButtons |= XUSB_GAMEPAD_START;
+    if (state & BUTTON_GUIDE)         report.wButtons |= XUSB_GAMEPAD_GUIDE;
+
+    // D-Pad
+    if (state & BUTTON_DPAD_UP)       report.wButtons |= XUSB_GAMEPAD_DPAD_UP;
+    if (state & BUTTON_DPAD_DOWN)     report.wButtons |= XUSB_GAMEPAD_DPAD_DOWN;
+    if (state & BUTTON_DPAD_LEFT)     report.wButtons |= XUSB_GAMEPAD_DPAD_LEFT;
+    if (state & BUTTON_DPAD_RIGHT)    report.wButtons |= XUSB_GAMEPAD_DPAD_RIGHT;
+
+    // Analog triggers (GC has analog triggers)
+    report.bLeftTrigger = buffer[0x3c];
+    report.bRightTrigger = buffer[0x3d];
+    if (state & TRIGGER_LT_MASK)      report.wButtons |= XUSB_GAMEPAD_LEFT_SHOULDER;
+    if (state & TRIGGER_RT_MASK)      report.wButtons |= XUSB_GAMEPAD_RIGHT_SHOULDER;
+
+    // Sticks
+    auto [lx, ly] = decode_pro_joystick(&buffer[10]);
+    auto [rx, ry] = decode_pro_joystick(&buffer[13]);
+
+    report.sThumbLX = lx;
+    report.sThumbLY = ly;
+    report.sThumbRX = rx;
+    report.sThumbRY = ry;
+
+    return report;
+}

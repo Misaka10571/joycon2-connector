@@ -49,6 +49,10 @@ public:
         return vigem_target_ds4_alloc();
     }
 
+    PVIGEM_TARGET AllocX360() {
+        return vigem_target_x360_alloc();
+    }
+
     bool AddTarget(PVIGEM_TARGET target) {
         if (!client) return false;
         return VIGEM_SUCCESS(vigem_target_add(client, target));
