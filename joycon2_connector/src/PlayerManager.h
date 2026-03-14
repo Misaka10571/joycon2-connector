@@ -19,9 +19,6 @@ struct VibrationContext {
     GattCharacteristic writeChar{ nullptr };
     GattCharacteristic writeCharLeft{ nullptr };   // for dual joycon
     GattCharacteristic writeCharRight{ nullptr };  // for dual joycon
-    GattCharacteristic vibrationChar{ nullptr };   // dedicated vibration characteristic (preferred for raw mode)
-    GattCharacteristic vibrationCharLeft{ nullptr };  // for dual joycon
-    GattCharacteristic vibrationCharRight{ nullptr }; // for dual joycon
     bool isDual = false;
     std::chrono::steady_clock::time_point lastSendTime{};
     uint8_t lastMotorL = 0;       // track to avoid redundant sends
@@ -30,12 +27,6 @@ struct VibrationContext {
     uint8_t sequenceCounter = 0;  // raw vibration frame sequence (lower 4 bits used)
     std::shared_ptr<std::atomic<bool>> useRawVibration; // per-device vibration mode toggle
     static constexpr int MIN_INTERVAL_MS = 50;     // throttle BLE writes
-
-    // Get the best characteristic for raw vibration writes
-    // Prefers dedicated vibration char, falls back to command char
-    GattCharacteristic GetVibChar() const { return vibrationChar ? vibrationChar : writeChar; }
-    GattCharacteristic GetVibCharLeft() const { return vibrationCharLeft ? vibrationCharLeft : writeCharLeft; }
-    GattCharacteristic GetVibCharRight() const { return vibrationCharRight ? vibrationCharRight : writeCharRight; }
 };
 
 // ViGEm DS4 vibration notification callback (runs on ViGEm worker thread)
@@ -69,28 +60,28 @@ inline VOID CALLBACK DS4VibrationCallback(
 
     if (rawMode) {
         // --- Raw vibration mode (0x5N protocol) ---
-        // Sends 32-byte frame with two 16-byte sub-packets (Packet A = large motor, Packet B = small motor).
         // Directly controls vibration motors, no audible beep on Pro2.
         if (motorL == ctx->lastMotorL && motorR == ctx->lastMotorR) return;
         ctx->lastMotorL = motorL;
         ctx->lastMotorR = motorR;
         ctx->lastSendTime = now;
 
+        bool vibEnabled = (motorL > 0 || motorR > 0);
         uint8_t seq = ctx->sequenceCounter++;
-        uint8_t dataA[12], dataB[12];
-        EncodeVibrationPayload(motorL, dataA);  // Packet A: large motor
-        EncodeVibrationPayload(motorR, dataB);  // Packet B: small motor
 
         if (ctx->isDual) {
-            // Each joycon gets a full 32-byte frame
-            uint8_t zeroData[12] = {};
-            if (ctx->GetVibCharLeft())
-                SendRawVibrationAsync(ctx->GetVibCharLeft(), motorL > 0, dataA, false, zeroData, seq);
-            if (ctx->GetVibCharRight())
-                SendRawVibrationAsync(ctx->GetVibCharRight(), false, zeroData, motorR > 0, dataB, seq);
+            uint8_t leftData[12], rightData[12];
+            EncodeVibrationPayload(motorL, 0, leftData);
+            EncodeVibrationPayload(0, motorR, rightData);
+            if (ctx->writeCharLeft)
+                SendRawVibrationAsync(ctx->writeCharLeft, motorL > 0, leftData, seq);
+            if (ctx->writeCharRight)
+                SendRawVibrationAsync(ctx->writeCharRight, motorR > 0, rightData, seq);
         } else {
-            if (ctx->GetVibChar())
-                SendRawVibrationAsync(ctx->GetVibChar(), motorL > 0, dataA, motorR > 0, dataB, seq);
+            uint8_t vibData[12];
+            EncodeVibrationPayload(motorL, motorR, vibData);
+            if (ctx->writeChar)
+                SendRawVibrationAsync(ctx->writeChar, vibEnabled, vibData, seq);
         }
     } else {
         // --- Predefined sample mode (0x0A command) ---
@@ -158,20 +149,22 @@ inline VOID CALLBACK X360VibrationCallback(
         ctx->lastMotorR = motorR;
         ctx->lastSendTime = now;
 
+        bool vibEnabled = (motorL > 0 || motorR > 0);
         uint8_t seq = ctx->sequenceCounter++;
-        uint8_t dataA[12], dataB[12];
-        EncodeVibrationPayload(motorL, dataA);
-        EncodeVibrationPayload(motorR, dataB);
 
         if (ctx->isDual) {
-            uint8_t zeroData[12] = {};
-            if (ctx->GetVibCharLeft())
-                SendRawVibrationAsync(ctx->GetVibCharLeft(), motorL > 0, dataA, false, zeroData, seq);
-            if (ctx->GetVibCharRight())
-                SendRawVibrationAsync(ctx->GetVibCharRight(), false, zeroData, motorR > 0, dataB, seq);
+            uint8_t leftData[12], rightData[12];
+            EncodeVibrationPayload(motorL, 0, leftData);
+            EncodeVibrationPayload(0, motorR, rightData);
+            if (ctx->writeCharLeft)
+                SendRawVibrationAsync(ctx->writeCharLeft, motorL > 0, leftData, seq);
+            if (ctx->writeCharRight)
+                SendRawVibrationAsync(ctx->writeCharRight, motorR > 0, rightData, seq);
         } else {
-            if (ctx->GetVibChar())
-                SendRawVibrationAsync(ctx->GetVibChar(), motorL > 0, dataA, motorR > 0, dataB, seq);
+            uint8_t vibData[12];
+            EncodeVibrationPayload(motorL, motorR, vibData);
+            if (ctx->writeChar)
+                SendRawVibrationAsync(ctx->writeChar, vibEnabled, vibData, seq);
         }
     } else {
         uint8_t sample;
@@ -499,7 +492,6 @@ public:
         // Register vibration callback
         player.vibCtx = std::make_unique<VibrationContext>();
         player.vibCtx->writeChar = cj.writeChar;
-        player.vibCtx->vibrationChar = cj.vibrationChar;
         if (xboxMode) {
             vigem_target_x360_register_notification(
                 vigem.GetClient(), target, X360VibrationCallback, player.vibCtx.get());
@@ -764,8 +756,6 @@ public:
         dp->vibCtx->isDual = true;
         dp->vibCtx->writeCharLeft = leftJoyCon.writeChar;
         dp->vibCtx->writeCharRight = pendingDualRight.writeChar;
-        dp->vibCtx->vibrationCharLeft = leftJoyCon.vibrationChar;
-        dp->vibCtx->vibrationCharRight = pendingDualRight.vibrationChar;
         if (xboxMode) {
             vigem_target_x360_register_notification(
                 vigem.GetClient(), target, X360VibrationCallback, dp->vibCtx.get());
@@ -919,7 +909,6 @@ public:
         auto& pp = proPlayers.back();
         pp.vibCtx = std::make_unique<VibrationContext>();
         pp.vibCtx->writeChar = controller.writeChar;
-        pp.vibCtx->vibrationChar = controller.vibrationChar;
         pp.vibCtx->useRawVibration = rawVibFlag;
         if (xboxMode) {
             vigem_target_x360_register_notification(

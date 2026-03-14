@@ -28,7 +28,6 @@ struct ConnectedJoyCon {
     BluetoothLEDevice device = nullptr;
     GattCharacteristic inputChar = nullptr;
     GattCharacteristic writeChar = nullptr;
-    GattCharacteristic vibrationChar = nullptr;  // dedicated vibration characteristic (handle 0x0012)
     uint64_t bleAddress = 0;
 };
 
@@ -180,16 +179,6 @@ private:
                     cj.inputChar = characteristic;
                 else if (characteristic.Uuid() == guid(WRITE_COMMAND_UUID_STR))
                     cj.writeChar = characteristic;
-                else {
-                    // Look for additional WriteWithoutResponse characteristics
-                    // The controller exposes a dedicated vibration characteristic (BLE handle 0x0012)
-                    // that is separate from the command characteristic
-                    auto props = characteristic.CharacteristicProperties();
-                    if ((props & GattCharacteristicProperties::WriteWithoutResponse) == GattCharacteristicProperties::WriteWithoutResponse
-                        && !cj.vibrationChar) {
-                        cj.vibrationChar = characteristic;
-                    }
-                }
             }
         }
 
