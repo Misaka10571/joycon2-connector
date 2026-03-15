@@ -94,7 +94,7 @@ inline VOID CALLBACK DS4VibrationCallback(
         } else if (motorL > 80 || motorR > 80) {
             sample = VIB_STRONG_THUNK;
         } else {
-            sample = VIB_DUN;
+            sample = VIB_NONE;  // Suppress weak vibration — VIB_DUN triggers buzzer/speaker
         }
 
         if (sample == ctx->lastSample && sample != VIB_NONE) return;
@@ -171,7 +171,7 @@ inline VOID CALLBACK X360VibrationCallback(
         if (motorL == 0 && motorR == 0) sample = VIB_NONE;
         else if (motorL > 180 || motorR > 180) sample = VIB_BUZZ;
         else if (motorL > 80 || motorR > 80) sample = VIB_STRONG_THUNK;
-        else sample = VIB_DUN;
+        else sample = VIB_NONE;  // Suppress weak vibration — VIB_DUN triggers buzzer/speaker
 
         if (sample == ctx->lastSample && sample != VIB_NONE) return;
         ctx->lastSample = sample;
