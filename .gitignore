@@ -3,3 +3,6 @@ joycon2_connector/build/
 .claude/
 .vscode/
 docs/
+command_handler.lua
+common.lua
+input_handler.lua
