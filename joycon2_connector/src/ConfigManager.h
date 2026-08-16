@@ -4,6 +4,10 @@
 #include <fstream>
 #include <sstream>
 #include <map>
+#include <filesystem>
+#include <system_error>
+#include <Windows.h>
+#include <shlobj.h>
 #include "Logger.h"
 
 // GL/GR Button Mapping Configuration
@@ -60,6 +64,7 @@ struct AppConfig {
     bool minimizeToTray = false;  // Minimize to system tray on close instead of exiting
     bool autoCheckUpdate = false;  // Auto check for updates on startup (default off)
     bool suppressXboxWarning = false;  // Don't show Xbox emulation gyro warning
+    bool nonWindows11WarningShown = false;  // Only show the Bluetooth rate warning once
 };
 
 // Button mapping string conversion helpers
@@ -141,6 +146,7 @@ inline std::string ConfigToJSON(const AppConfig& config) {
     oss << "  \"minimizeToTray\": " << (config.minimizeToTray ? "true" : "false") << ",\n";
     oss << "  \"autoCheckUpdate\": " << (config.autoCheckUpdate ? "true" : "false") << ",\n";
     oss << "  \"suppressXboxWarning\": " << (config.suppressXboxWarning ? "true" : "false") << ",\n";
+    oss << "  \"nonWindows11WarningShown\": " << (config.nonWindows11WarningShown ? "true" : "false") << ",\n";
     oss << "  \"deviceSettings\": [\n";
     size_t dsIdx = 0;
     for (const auto& [addr, ds] : config.deviceSettings) {
@@ -270,6 +276,9 @@ inline bool JSONToConfig(const std::string& json, AppConfig& config) {
     // Parse suppressXboxWarning
     config.suppressXboxWarning = ExtractJsonBool(json, "suppressXboxWarning", false);
 
+    // Parse one-time Windows version warning state
+    config.nonWindows11WarningShown = ExtractJsonBool(json, "nonWindows11WarningShown", false);
+
     // Parse per-device settings
     config.deviceSettings.clear();
     auto dsPos = json.find("\"deviceSettings\"");
@@ -310,28 +319,40 @@ public:
     }
 
     AppConfig config;
-    const std::string configFile = "joycon2_config.json";
+    const std::filesystem::path configFile;
 
     bool Load() {
+        MigrateLegacyConfig();
         std::ifstream file(configFile);
         if (!file.is_open()) {
-            APP_LOG_DEBUG("Config file %s not found (first launch?)", configFile.c_str());
+            APP_LOG_DEBUG("Config file %s not found (first launch?)", configFile.string().c_str());
             return false;
         }
         std::stringstream ss;
         ss << file.rdbuf();
-        APP_LOG_DEBUG("Config loaded from %s", configFile.c_str());
+        APP_LOG_DEBUG("Config loaded from %s", configFile.string().c_str());
         return JSONToConfig(ss.str(), config);
     }
 
     void Save() {
+        std::error_code ec;
+        const auto configDirectory = configFile.parent_path();
+        if (!configDirectory.empty()) {
+            std::filesystem::create_directories(configDirectory, ec);
+            if (ec) {
+                APP_LOG_WARNING("Could not create config directory %s (error %d)",
+                    configDirectory.string().c_str(), ec.value());
+                return;
+            }
+        }
+
         std::ofstream file(configFile);
         if (file.is_open()) {
             file << ConfigToJSON(config);
             file.close();
-            APP_LOG_DEBUG("Config saved to %s", configFile.c_str());
+            APP_LOG_DEBUG("Config saved to %s", configFile.string().c_str());
         } else {
-            APP_LOG_WARNING("Could not open %s for writing", configFile.c_str());
+            APP_LOG_WARNING("Could not open %s for writing", configFile.string().c_str());
         }
     }
 
@@ -358,5 +379,84 @@ public:
     }
 
 private:
-    ConfigManager() = default;
+    ConfigManager() : configFile(GetConfigFilePath()) {}
+
+    static std::filesystem::path GetConfigFilePath() {
+        PWSTR localAppData = nullptr;
+        if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_LocalAppData, KF_FLAG_DEFAULT, nullptr, &localAppData))) {
+            std::filesystem::path path(localAppData);
+            CoTaskMemFree(localAppData);
+            return path / L"joycon2_connector" / L"joycon2_config.json";
+        }
+
+        wchar_t fallback[MAX_PATH] = {};
+        DWORD length = GetEnvironmentVariableW(L"LOCALAPPDATA", fallback, MAX_PATH);
+        if (length > 0 && length < MAX_PATH) {
+            return std::filesystem::path(fallback) / L"joycon2_connector" / L"joycon2_config.json";
+        }
+
+        APP_LOG_WARNING("Could not locate Local AppData; falling back to the current directory");
+        return std::filesystem::path(L"joycon2_config.json");
+    }
+
+    static std::filesystem::path GetExecutableDirectory() {
+        std::wstring path(MAX_PATH, L'\0');
+        for (;;) {
+            DWORD copied = GetModuleFileNameW(nullptr, path.data(), static_cast<DWORD>(path.size()));
+            if (copied == 0) return {};
+            if (copied < path.size()) {
+                path.resize(copied);
+                return std::filesystem::path(path).parent_path();
+            }
+            if (path.size() >= 32768) return {};
+            path.resize(path.size() * 2);
+        }
+    }
+
+    void MigrateLegacyConfig() {
+        std::error_code ec;
+        if (std::filesystem::exists(configFile, ec)) return;
+
+        std::vector<std::filesystem::path> legacyFiles;
+        auto currentDirectory = std::filesystem::current_path(ec);
+        if (!ec) legacyFiles.push_back(currentDirectory / L"joycon2_config.json");
+        auto executableDirectory = GetExecutableDirectory();
+        if (!executableDirectory.empty()) {
+            legacyFiles.push_back(executableDirectory / L"joycon2_config.json");
+        }
+
+        for (const auto& legacyFile : legacyFiles) {
+            if (legacyFile.lexically_normal() == configFile.lexically_normal()) continue;
+
+            ec.clear();
+            if (!std::filesystem::is_regular_file(legacyFile, ec) || ec) continue;
+
+            const auto configDirectory = configFile.parent_path();
+            if (!configDirectory.empty()) {
+                std::filesystem::create_directories(configDirectory, ec);
+                if (ec) {
+                    APP_LOG_WARNING("Could not create config directory for migration (error %d)", ec.value());
+                    return;
+                }
+            }
+
+            std::filesystem::copy_file(legacyFile, configFile, std::filesystem::copy_options::none, ec);
+            if (ec) {
+                APP_LOG_WARNING("Could not migrate config from %s to %s (error %d)",
+                    legacyFile.string().c_str(), configFile.string().c_str(), ec.value());
+                return;
+            }
+
+            std::error_code removeError;
+            std::filesystem::remove(legacyFile, removeError);
+            if (removeError) {
+                APP_LOG_WARNING("Config migrated, but old file %s could not be removed (error %d)",
+                    legacyFile.string().c_str(), removeError.value());
+            } else {
+                APP_LOG_INFO("Config migrated from %s to %s",
+                    legacyFile.string().c_str(), configFile.string().c_str());
+            }
+            return;
+        }
+    }
 };

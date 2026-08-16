@@ -115,6 +115,10 @@
     "update_go_to_download": "前往下载",
     "update_later": "稍后再说",
 
+    "startup_os_warning_title": "蓝牙性能提示",
+    "startup_os_warning_msg": "检测到当前系统并非 Windows 11。较旧 Windows 系统的蓝牙更新率仅约 20 Hz，可能影响使用体验；Windows 11 可根据蓝牙版本达到约 70-133 Hz。",
+    "startup_os_warning_confirm": "我知道了",
+
     "tray_show": "显示主窗口",
     "tray_no_device": "暂无已连接的手柄",
     "tray_disconnect": "断开连接",

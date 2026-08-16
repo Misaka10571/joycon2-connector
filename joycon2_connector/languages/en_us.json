@@ -115,6 +115,10 @@
     "update_go_to_download": "Go to Download",
     "update_later": "Later",
 
+    "startup_os_warning_title": "Bluetooth Performance Notice",
+    "startup_os_warning_msg": "This system is not Windows 11. On older Windows versions, the Bluetooth update rate is limited to about 20 Hz, which may affect responsiveness. On Windows 11, it can reach about 70-133 Hz depending on the Bluetooth version.",
+    "startup_os_warning_confirm": "I Understand",
+
     "tray_show": "Show Main Window",
     "tray_no_device": "No controllers connected",
     "tray_disconnect": "Disconnect",

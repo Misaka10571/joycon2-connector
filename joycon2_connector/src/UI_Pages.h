@@ -131,15 +131,61 @@ inline void StatusChip(const char* label, ImVec4 bg, ImVec4 textColor) {
     ImVec2 textSize = ImGui::CalcTextSize(label);
     ImVec2 pos = ImGui::GetCursorScreenPos();
     float pad = S(8);
+    float dotR = S(4);
+    float gap = S(6);
     float chipH = textSize.y + pad * 2;
-    float chipW = textSize.x + pad * 3;
+    float chipW = pad + dotR * 2 + gap + textSize.x + S(10);
 
     ImDrawList* dl = ImGui::GetWindowDrawList();
     dl->AddRectFilled(pos, ImVec2(pos.x + chipW, pos.y + chipH), ImGui::GetColorU32(bg), chipH * 0.5f);
-    float dotR = S(4);
     dl->AddCircleFilled(ImVec2(pos.x + pad + dotR, pos.y + chipH * 0.5f), dotR, ImGui::GetColorU32(textColor));
-    dl->AddText(ImVec2(pos.x + pad + dotR * 2 + S(6), pos.y + pad), ImGui::GetColorU32(textColor), label);
+    dl->AddText(ImVec2(pos.x + pad + dotR * 2 + gap, pos.y + pad), ImGui::GetColorU32(textColor), label);
     ImGui::Dummy(ImVec2(chipW, chipH));
+}
+
+inline bool RenderWindowsVersionWarning(bool& showWarning) {
+    if (showWarning) {
+        ImGui::OpenPopup("##WindowsVersionWarning");
+        showWarning = false;
+    }
+
+    bool warningShown = false;
+    ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+    ImGui::SetNextWindowSize(ImVec2(S(480), 0));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(S(24), S(20)));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, S(16));
+    ImGui::PushStyleColor(ImGuiCol_PopupBg, UITheme::SurfaceCard);
+
+    if (ImGui::BeginPopupModal("##WindowsVersionWarning", nullptr,
+        ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_AlwaysAutoResize))
+    {
+        warningShown = true;
+        ImGui::PushFont(ImGui::GetIO().Fonts->Fonts.Size > 1 ? ImGui::GetIO().Fonts->Fonts[1] : nullptr);
+        ImGui::TextColored(UITheme::Primary, "%s", T("startup_os_warning_title"));
+        if (ImGui::GetIO().Fonts->Fonts.Size > 1) ImGui::PopFont();
+
+        ImGui::Spacing();
+        ImGui::Spacing();
+        ImGui::TextWrapped("%s", T("startup_os_warning_msg"));
+        ImGui::Spacing();
+        ImGui::Spacing();
+        ImGui::Spacing();
+
+        float buttonWidth = ImGui::CalcTextSize(T("startup_os_warning_confirm")).x + S(48);
+        float availableWidth = ImGui::GetContentRegionAvail().x;
+        if (buttonWidth < availableWidth) {
+            ImGui::SetCursorPosX(ImGui::GetCursorPosX() + availableWidth - buttonWidth);
+        }
+        if (PrimaryButton(T("startup_os_warning_confirm"))) {
+            ImGui::CloseCurrentPopup();
+        }
+
+        ImGui::EndPopup();
+    }
+
+    ImGui::PopStyleColor();
+    ImGui::PopStyleVar(2);
+    return warningShown;
 }
 
 // Helper: Icon button (gear/settings) - MD3 tonal icon button
