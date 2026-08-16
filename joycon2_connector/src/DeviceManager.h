@@ -17,6 +17,7 @@
 #include <thread>
 #include "Logger.h"
 #include "BluetoothLog.h"
+#include "ConnectionError.h"
 
 using namespace winrt;
 using namespace Windows::Devices::Bluetooth;
@@ -39,6 +40,12 @@ struct ConnectedJoyCon {
 
 enum class ScanState { Idle, Scanning, Found, Error, Timeout };
 
+struct ScanResult {
+    ConnectedJoyCon controller;
+    ScanState state = ScanState::Idle;
+    ConnectionError error;
+};
+
 inline const char* ScanStateName(ScanState state) {
     switch (state) {
     case ScanState::Idle:     return "Idle";
@@ -57,14 +64,14 @@ public:
         return inst;
     }
 
-    using ScanCallback = std::function<void(ConnectedJoyCon, ScanState)>;
+    using ScanCallback = std::function<void(ScanResult)>;
 
     ScanState GetScanState() const { return state.load(); }
 
-    void StartScan(ScanCallback callback) {
+    bool StartScan(ScanCallback callback) {
         if (state.load() == ScanState::Scanning) {
             APP_LOG_WARNING("StartScan ignored: a BLE scan is already in progress");
-            return;
+            return false;
         }
         
         APP_LOG_INFO("Starting BLE scan for Nintendo Switch 2 controller "
@@ -73,8 +80,6 @@ public:
                      BluetoothLog::BytesToHex(JOYCON_MANUFACTURER_PREFIX.data(),
                                               JOYCON_MANUFACTURER_PREFIX.size()).c_str());
         state.store(ScanState::Scanning);
-        scanCallback = callback;
-
         // Run scanning in background thread so UI stays responsive
         // Wait for previous thread to finish if it's still joinable
         if (scanThread.joinable()) {
@@ -82,20 +87,28 @@ public:
             // If still joinable, try to join with a brief wait via detach
             scanThread.detach();
         }
-        scanThread = std::thread([this]() {
+        scanThread = std::thread([this, callback = std::move(callback)]() {
+            bool apartmentInitialized = false;
             try {
-                RunScan();
+                winrt::init_apartment(winrt::apartment_type::multi_threaded);
+                apartmentInitialized = true;
+                RunScan(callback);
             } catch (const winrt::hresult_error& e) {
                 APP_LOG_ERROR("BLE scan thread failed: %s",
                               BluetoothLog::DescribeHResultError(e).c_str());
                 state.store(ScanState::Error);
-                if (scanCallback) scanCallback(ConnectedJoyCon{}, ScanState::Error);
+                Notify(callback, { {}, ScanState::Error,
+                    { ConnectionErrorKind::Internal, ConnectionErrorStage::ScanWatcher,
+                      BluetoothLog::DescribeHResultError(e) } });
             } catch (...) {
                 APP_LOG_ERROR("BLE scan thread failed with an unknown exception");
                 state.store(ScanState::Error);
-                if (scanCallback) scanCallback(ConnectedJoyCon{}, ScanState::Error);
+                Notify(callback, { {}, ScanState::Error,
+                    { ConnectionErrorKind::Internal, ConnectionErrorStage::ScanWatcher, {} } });
             }
+            if (apartmentInitialized) winrt::uninit_apartment();
         });
+        return true;
     }
 
     void StopScan() {
@@ -114,13 +127,53 @@ public:
 private:
     DeviceManager() = default;
 
-    void RunScan() {
+    static void Notify(const ScanCallback& callback, ScanResult result) {
+        if (!callback) return;
+        try {
+            callback(std::move(result));
+        } catch (const winrt::hresult_error& e) {
+            APP_LOG_ERROR("BLE scan completion callback failed: %s",
+                          BluetoothLog::DescribeHResultError(e).c_str());
+        } catch (...) {
+            APP_LOG_ERROR("BLE scan completion callback failed with an unknown exception");
+        }
+    }
+
+    static ConnectionErrorKind ClassifyWatcherError(BluetoothError error) {
+        switch (error) {
+        case BluetoothError::RadioNotAvailable:
+        case BluetoothError::DisabledByUser:
+        case BluetoothError::ResourceInUse:
+            return ConnectionErrorKind::BluetoothAdapterUnavailable;
+        case BluetoothError::DisabledByPolicy:
+        case BluetoothError::ConsentRequired:
+            return ConnectionErrorKind::BluetoothAccessDenied;
+        default:
+            return ConnectionErrorKind::ScanFailed;
+        }
+    }
+
+    static ConnectionErrorKind ClassifyScanStartHResult(int32_t code) {
+        if (IsAccessDeniedHResult(code)) return ConnectionErrorKind::BluetoothAccessDenied;
+        switch (static_cast<uint32_t>(code)) {
+        case 0x80070015u: // ERROR_NOT_READY
+        case 0x8007048Fu: // ERROR_DEVICE_NOT_CONNECTED
+        case 0x80070490u: // ERROR_NOT_FOUND
+        case 0x800710DFu: // ERROR_DEVICE_NOT_AVAILABLE
+            return ConnectionErrorKind::BluetoothAdapterUnavailable;
+        default:
+            return ConnectionErrorKind::ScanFailed;
+        }
+    }
+
+    void RunScan(const ScanCallback& callback) {
         cancelScan.store(false);
         ConnectedJoyCon cj{};
         BluetoothLEDevice device = nullptr;
         std::atomic<bool> candidateClaimed{ false };
         std::atomic<bool> deviceReady{ false };
         std::atomic<bool> watcherFailed{ false };
+        std::atomic<BluetoothError> watcherError{ BluetoothError::Success };
         std::atomic<uint32_t> advertisementsReceived{ 0 };
         std::atomic<uint32_t> nintendoAdvertisementsReceived{ 0 };
         std::atomic<uint32_t> matchingAdvertisementsReceived{ 0 };
@@ -129,6 +182,8 @@ private:
         BluetoothLEAdvertisementWatcher watcher;
         std::mutex mtx;
         std::condition_variable cv;
+        std::mutex candidateErrorMutex;
+        ConnectionError lastCandidateError;
 
         watcher.Received([&](auto const&, auto const& args) {
             try {
@@ -185,6 +240,16 @@ private:
                                 std::chrono::steady_clock::now() - createStarted).count();
                             APP_LOG_ERROR("Failed to create BluetoothLEDevice for address %llu after %lld ms: %s",
                                           address, elapsedMs, BluetoothLog::DescribeHResultError(e).c_str());
+                            {
+                                std::lock_guard<std::mutex> lock(candidateErrorMutex);
+                                lastCandidateError = {
+                                    IsAccessDeniedHResult(e.code().value)
+                                        ? ConnectionErrorKind::BluetoothAccessDenied
+                                        : ConnectionErrorKind::DeviceUnavailable,
+                                    ConnectionErrorStage::OpenDevice,
+                                    BluetoothLog::DescribeHResultError(e)
+                                };
+                            }
                             candidateClaimed.store(false, std::memory_order_release);
                             cv.notify_one();
                             return;
@@ -193,6 +258,11 @@ private:
                                 std::chrono::steady_clock::now() - createStarted).count();
                             APP_LOG_ERROR("Failed to create BluetoothLEDevice for address %llu after %lld ms: unknown exception",
                                           address, elapsedMs);
+                            {
+                                std::lock_guard<std::mutex> lock(candidateErrorMutex);
+                                lastCandidateError = { ConnectionErrorKind::DeviceUnavailable,
+                                    ConnectionErrorStage::OpenDevice, {} };
+                            }
                             candidateClaimed.store(false, std::memory_order_release);
                             cv.notify_one();
                             return;
@@ -204,6 +274,11 @@ private:
                             APP_LOG_WARNING("BluetoothLEDevice::FromBluetoothAddressAsync returned null for address %llu "
                                             "after %lld ms (device was not available in the Windows Bluetooth cache)",
                                             address, elapsedMs);
+                            {
+                                std::lock_guard<std::mutex> lock(candidateErrorMutex);
+                                lastCandidateError = { ConnectionErrorKind::DeviceUnavailable,
+                                    ConnectionErrorStage::OpenDevice, {} };
+                            }
                             candidateClaimed.store(false, std::memory_order_release);
                             cv.notify_one();
                             return;
@@ -263,6 +338,7 @@ private:
             } else {
                 APP_LOG_WARNING("BLE advertisement watcher stopped: %s",
                                 BluetoothLog::DescribeBluetoothError(error).c_str());
+                watcherError.store(error, std::memory_order_release);
                 watcherFailed.store(true, std::memory_order_release);
                 cv.notify_one();
             }
@@ -276,12 +352,16 @@ private:
             APP_LOG_ERROR("Failed to start BLE advertisement watcher: %s",
                           BluetoothLog::DescribeHResultError(e).c_str());
             state.store(ScanState::Error);
-            if (scanCallback) scanCallback(ConnectedJoyCon{}, ScanState::Error);
+            Notify(callback, { {}, ScanState::Error,
+                { ClassifyScanStartHResult(e.code().value),
+                  ConnectionErrorStage::StartScan,
+                  BluetoothLog::DescribeHResultError(e) } });
             return;
         } catch (...) {
             APP_LOG_ERROR("Failed to start BLE advertisement watcher: unknown exception");
             state.store(ScanState::Error);
-            if (scanCallback) scanCallback(ConnectedJoyCon{}, ScanState::Error);
+            Notify(callback, { {}, ScanState::Error,
+                { ConnectionErrorKind::ScanFailed, ConnectionErrorStage::StartScan, {} } });
             return;
         }
 
@@ -326,7 +406,13 @@ private:
             APP_LOG_WARNING("No GATT connection was attempted. The controller may be powered off, out of range, "
                             "not advertising the expected controller payload, or the Bluetooth radio/driver may not be receiving advertisements");
             state.store(ScanState::Timeout);
-            if (scanCallback) scanCallback(ConnectedJoyCon{}, ScanState::Timeout);
+            ConnectionError timeoutError = { ConnectionErrorKind::ScanTimeout,
+                ConnectionErrorStage::ScanWatcher, {} };
+            {
+                std::lock_guard<std::mutex> lock(candidateErrorMutex);
+                if (lastCandidateError) timeoutError = lastCandidateError;
+            }
+            Notify(callback, { {}, ScanState::Timeout, std::move(timeoutError) });
             return;
         }
 
@@ -334,7 +420,10 @@ private:
             watcher.Stop();
             APP_LOG_ERROR("BLE scan aborted: advertisement watcher stopped with an error");
             state.store(ScanState::Error);
-            if (scanCallback) scanCallback(ConnectedJoyCon{}, ScanState::Error);
+            BluetoothError error = watcherError.load(std::memory_order_acquire);
+            Notify(callback, { {}, ScanState::Error,
+                { ClassifyWatcherError(error), ConnectionErrorStage::ScanWatcher,
+                  BluetoothLog::DescribeBluetoothError(error) } });
             return;
         }
 
@@ -377,9 +466,14 @@ private:
                           "(connection_status: %s): %s",
                           cj.bleAddress, elapsedMs,
                           BluetoothLog::ConnectionStatusName(device.ConnectionStatus()),
-                          BluetoothLog::DescribeHResultError(e).c_str());
+                           BluetoothLog::DescribeHResultError(e).c_str());
             state.store(ScanState::Error);
-            if (scanCallback) scanCallback(ConnectedJoyCon{}, ScanState::Error);
+            Notify(callback, { {}, ScanState::Error,
+                { IsAccessDeniedHResult(e.code().value)
+                    ? ConnectionErrorKind::GattAccessDenied
+                    : ConnectionErrorKind::GattUnreachable,
+                  ConnectionErrorStage::DiscoverServices,
+                  BluetoothLog::DescribeHResultError(e) } });
             return;
         } catch (...) {
             auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -389,7 +483,8 @@ private:
                           cj.bleAddress, elapsedMs,
                           BluetoothLog::ConnectionStatusName(device.ConnectionStatus()));
             state.store(ScanState::Error);
-            if (scanCallback) scanCallback(ConnectedJoyCon{}, ScanState::Error);
+            Notify(callback, { {}, ScanState::Error,
+                { ConnectionErrorKind::Internal, ConnectionErrorStage::DiscoverServices, {} } });
             return;
         }
 
@@ -413,7 +508,15 @@ private:
                                 "power/range loss, controller cooldown, or a transient Bluetooth link/driver failure");
             }
             state.store(ScanState::Error);
-            if (scanCallback) scanCallback(ConnectedJoyCon{}, ScanState::Error);
+            ConnectionErrorKind kind = ConnectionErrorKind::GattProtocolError;
+            if (servicesResult.Status() == GattCommunicationStatus::Unreachable)
+                kind = ConnectionErrorKind::GattUnreachable;
+            else if (servicesResult.Status() == GattCommunicationStatus::AccessDenied)
+                kind = ConnectionErrorKind::GattAccessDenied;
+            Notify(callback, { {}, ScanState::Error,
+                { kind, ConnectionErrorStage::DiscoverServices,
+                  BluetoothLog::DescribeGattStatus(servicesResult.Status(),
+                                                   servicesResult.ProtocolError()) } });
             return;
         }
         auto discoveryElapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -421,6 +524,7 @@ private:
         APP_LOG_DEBUG("GATT service discovery succeeded for address %llu in %lld ms (%u service(s))",
                       cj.bleAddress, discoveryElapsedMs, servicesResult.Services().Size());
 
+        ConnectionError characteristicError;
         for (auto service : servicesResult.Services()) {
             if (cancelScan.load()) {
                 state.store(ScanState::Idle);
@@ -437,10 +541,19 @@ private:
                 APP_LOG_WARNING("GetCharacteristicsAsync threw for service %s: %s",
                                 BluetoothLog::GuidToString(service.Uuid()).c_str(),
                                 BluetoothLog::DescribeHResultError(e).c_str());
+                characteristicError = {
+                    IsAccessDeniedHResult(e.code().value)
+                        ? ConnectionErrorKind::GattAccessDenied
+                        : ConnectionErrorKind::GattProtocolError,
+                    ConnectionErrorStage::DiscoverCharacteristics,
+                    BluetoothLog::DescribeHResultError(e)
+                };
                 continue;
             } catch (...) {
                 APP_LOG_WARNING("GetCharacteristicsAsync threw an unknown exception for service %s",
                                 BluetoothLog::GuidToString(service.Uuid()).c_str());
+                characteristicError = { ConnectionErrorKind::Internal,
+                    ConnectionErrorStage::DiscoverCharacteristics, {} };
                 continue;
             }
 
@@ -453,6 +566,13 @@ private:
                                 BluetoothLog::GuidToString(service.Uuid()).c_str(),
                                 BluetoothLog::DescribeGattStatus(charsResult.Status(),
                                                                  charsResult.ProtocolError()).c_str());
+                ConnectionErrorKind kind = ConnectionErrorKind::GattProtocolError;
+                if (charsResult.Status() == GattCommunicationStatus::Unreachable)
+                    kind = ConnectionErrorKind::GattUnreachable;
+                else if (charsResult.Status() == GattCommunicationStatus::AccessDenied)
+                    kind = ConnectionErrorKind::GattAccessDenied;
+                characteristicError = { kind, ConnectionErrorStage::DiscoverCharacteristics,
+                    BluetoothLog::DescribeGattStatus(charsResult.Status(), charsResult.ProtocolError()) };
                 continue;
             }
 
@@ -471,7 +591,12 @@ private:
             APP_LOG_ERROR("Required input-report characteristic %S was not found for address %llu",
                           INPUT_REPORT_UUID_STR, cj.bleAddress);
             state.store(ScanState::Error);
-            if (scanCallback) scanCallback(ConnectedJoyCon{}, ScanState::Error);
+            if (!characteristicError) {
+                characteristicError = { ConnectionErrorKind::UnsupportedController,
+                    ConnectionErrorStage::DiscoverCharacteristics,
+                    winrt::to_string(winrt::hstring(INPUT_REPORT_UUID_STR)) };
+            }
+            Notify(callback, { {}, ScanState::Error, std::move(characteristicError) });
             return;
         }
         if (!cj.writeChar) {
@@ -506,11 +631,10 @@ private:
         APP_LOG_INFO("BLE scan succeeded (address: %llu, input characteristic: found, write characteristic: %s)",
                      cj.bleAddress,
                      cj.writeChar ? "found" : "missing");
-        if (scanCallback) scanCallback(cj, ScanState::Found);
+        Notify(callback, { cj, ScanState::Found, {} });
     }
 
     std::atomic<ScanState> state{ ScanState::Idle };
     std::atomic<bool> cancelScan{ false };
-    ScanCallback scanCallback;
     std::thread scanThread;
 };

@@ -11,14 +11,23 @@
 #include "Logger.h"
 #include "version.h"
 #include <string>
+#include <atomic>
 #include <cmath>
 #include <algorithm>
+#include <mutex>
+#include <optional>
 #include "imgui_internal.h"
 
 // DPI-scaled pixel helper (delegates to UITheme::S)
 inline float S(float v) { return UITheme::S(v); }
 
 // Current wizard state for Add Device
+struct AddDeviceCompletion {
+    bool success = false;
+    bool advanceDual = false;
+    ConnectionError error;
+};
+
 struct AddDeviceWizard {
     int step = 0;  // 0 = select type, 1 = configure, 2 = scanning, 3 = dual right success, 4 = dual left scan
     ControllerType selectedType = ControllerType::SingleJoyCon;
@@ -28,11 +37,46 @@ struct AddDeviceWizard {
     bool scanStarted = false;
     float scanTimer = 0.0f;
     std::string statusMessage;
+    ConnectionError connectionError;
     bool dualFirstDone = false;
+    std::mutex completionMutex;
+    std::optional<AddDeviceCompletion> pendingCompletion;
+    std::atomic<uint64_t> scanGeneration{ 0 };
+
+    uint64_t BeginScan() {
+        connectionError = {};
+        statusMessage.clear();
+        std::lock_guard<std::mutex> lock(completionMutex);
+        pendingCompletion.reset();
+        return scanGeneration.fetch_add(1, std::memory_order_acq_rel) + 1;
+    }
+
+    void PublishCompletion(uint64_t generation, AddDeviceCompletion completion) {
+        if (scanGeneration.load(std::memory_order_acquire) != generation) return;
+        std::lock_guard<std::mutex> lock(completionMutex);
+        if (scanGeneration.load(std::memory_order_relaxed) == generation)
+            pendingCompletion = std::move(completion);
+    }
+
+    bool IsCurrentScan(uint64_t generation) const {
+        return scanGeneration.load(std::memory_order_acquire) == generation;
+    }
+
+    std::optional<AddDeviceCompletion> ConsumeCompletion() {
+        std::lock_guard<std::mutex> lock(completionMutex);
+        auto completion = std::move(pendingCompletion);
+        pendingCompletion.reset();
+        return completion;
+    }
 
     void Reset() {
+        scanGeneration.fetch_add(1, std::memory_order_acq_rel);
+        {
+            std::lock_guard<std::mutex> lock(completionMutex);
+            pendingCompletion.reset();
+        }
         step = 0; scanStarted = false; scanTimer = 0.0f;
-        statusMessage.clear(); dualFirstDone = false;
+        statusMessage.clear(); connectionError = {}; dualFirstDone = false;
         PlayerManager::Instance().ClearPendingDual();  // Release pending right Joy-Con BLE reference
     }
 };
@@ -212,6 +256,96 @@ inline bool IconButton(const char* id, float size = 0) {
     ImGui::PopStyleColor(4);
     ImGui::PopID();
     return result;
+}
+
+inline const char* ConnectionErrorReasonKey(ConnectionErrorKind kind) {
+    switch (kind) {
+    case ConnectionErrorKind::BluetoothAdapterUnavailable: return "add_error_bluetooth_adapter";
+    case ConnectionErrorKind::BluetoothAccessDenied:       return "add_error_bluetooth_access";
+    case ConnectionErrorKind::ScanTimeout:                 return "add_error_scan_timeout";
+    case ConnectionErrorKind::ScanFailed:                  return "add_error_scan_failed";
+    case ConnectionErrorKind::DeviceUnavailable:           return "add_error_device_unavailable";
+    case ConnectionErrorKind::GattUnreachable:             return "add_error_gatt_unreachable";
+    case ConnectionErrorKind::GattAccessDenied:            return "add_error_gatt_access";
+    case ConnectionErrorKind::GattProtocolError:           return "add_error_gatt_protocol";
+    case ConnectionErrorKind::UnsupportedController:       return "add_error_unsupported";
+    case ConnectionErrorKind::NotificationSubscription:    return "add_error_notification";
+    case ConnectionErrorKind::VirtualController:           return "add_error_virtual_controller";
+    case ConnectionErrorKind::VirtualControllerUnknown:    return "add_error_virtual_controller";
+    case ConnectionErrorKind::Internal:                    return "add_error_internal";
+    default:                                               return "add_error_unknown";
+    }
+}
+
+inline const char* ConnectionErrorSolutionKey(ConnectionErrorKind kind) {
+    switch (kind) {
+    case ConnectionErrorKind::BluetoothAdapterUnavailable: return "add_solution_bluetooth_adapter";
+    case ConnectionErrorKind::BluetoothAccessDenied:       return "add_solution_bluetooth_access";
+    case ConnectionErrorKind::ScanTimeout:                 return "add_solution_scan_timeout";
+    case ConnectionErrorKind::DeviceUnavailable:           return "add_solution_device_unavailable";
+    case ConnectionErrorKind::GattUnreachable:             return "add_solution_gatt_unreachable";
+    case ConnectionErrorKind::GattAccessDenied:            return "add_solution_gatt_access";
+    case ConnectionErrorKind::NotificationSubscription:    return "add_solution_notification";
+    case ConnectionErrorKind::VirtualController:           return "add_solution_virtual_controller";
+    default:                                               return nullptr;
+    }
+}
+
+inline const char* ConnectionErrorStageKey(ConnectionErrorStage stage) {
+    switch (stage) {
+    case ConnectionErrorStage::StartScan:               return "add_stage_start_scan";
+    case ConnectionErrorStage::ScanWatcher:             return "add_stage_scan";
+    case ConnectionErrorStage::OpenDevice:              return "add_stage_open_device";
+    case ConnectionErrorStage::DiscoverServices:        return "add_stage_services";
+    case ConnectionErrorStage::DiscoverCharacteristics: return "add_stage_characteristics";
+    case ConnectionErrorStage::RegisterInput:           return "add_stage_register_input";
+    case ConnectionErrorStage::SubscribeNotifications:  return "add_stage_subscribe";
+    case ConnectionErrorStage::CreateVirtualController: return "add_stage_virtual_controller";
+    case ConnectionErrorStage::StorePlayer:             return "add_stage_store_player";
+    case ConnectionErrorStage::StartWorker:             return "add_stage_start_worker";
+    default:                                            return nullptr;
+    }
+}
+
+inline void RenderConnectionError(const ConnectionError& error) {
+    ImGui::PushStyleColor(ImGuiCol_Text, UITheme::Error);
+    ImGui::TextWrapped("%s%s", T("add_connection_failed"), T(ConnectionErrorReasonKey(error.kind)));
+    ImGui::PopStyleColor();
+
+    const char* stageKey = ConnectionErrorStageKey(error.stage);
+    if (stageKey || !error.detail.empty()) {
+        ImGui::Spacing();
+        if (stageKey)
+            ImGui::TextColored(UITheme::TextSecondary, "%s: %s", T("add_error_stage"), T(stageKey));
+        if (!error.detail.empty())
+            ImGui::TextWrapped("%s: %s", T("add_error_details"), error.detail.c_str());
+    }
+
+    const char* solutionKey = ConnectionErrorSolutionKey(error.kind);
+    if (solutionKey) {
+        ImGui::Spacing();
+        if (SecondaryButton(T("add_possible_solution")))
+            ImGui::OpenPopup("##ConnectionSolution");
+
+        ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+        ImGui::SetNextWindowSize(ImVec2(S(480), 0));
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(S(24), S(20)));
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, S(16));
+        ImGui::PushStyleColor(ImGuiCol_PopupBg, UITheme::SurfaceCard);
+        if (ImGui::BeginPopupModal("##ConnectionSolution", nullptr,
+            ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_AlwaysAutoResize)) {
+            ImGui::PushFont(ImGui::GetIO().Fonts->Fonts.Size > 1 ? ImGui::GetIO().Fonts->Fonts[1] : nullptr);
+            ImGui::TextColored(UITheme::Primary, "%s", T("add_solution_title"));
+            if (ImGui::GetIO().Fonts->Fonts.Size > 1) ImGui::PopFont();
+            ImGui::Spacing(); ImGui::Spacing();
+            ImGui::TextWrapped("%s", T(solutionKey));
+            ImGui::Spacing(); ImGui::Spacing();
+            if (PrimaryButton(T("add_solution_close"))) ImGui::CloseCurrentPopup();
+            ImGui::EndPopup();
+        }
+        ImGui::PopStyleColor();
+        ImGui::PopStyleVar(2);
+    }
 }
 
 // Helper: Draw GitHub Invertocat mark icon — accurate SVG-path-based rendering.
@@ -796,6 +930,17 @@ inline void RenderDashboard() {
 // PAGE: Add Device
 // =============================================================
 inline void RenderAddDevice(int& activePage) {
+    if (auto completion = g_wizard.ConsumeCompletion()) {
+        if (completion->advanceDual) {
+            g_wizard.dualFirstDone = true;
+            g_wizard.scanStarted = false;
+            g_wizard.step = 3;
+        } else {
+            g_wizard.statusMessage = completion->success ? "OK" : "ERROR";
+            g_wizard.connectionError = std::move(completion->error);
+        }
+    }
+
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(S(24), S(24)));
     ImGui::BeginChild("AddDeviceContent", ImVec2(-S(8), 0), ImGuiChildFlags_None);
     ImGui::PopStyleVar();
@@ -923,44 +1068,54 @@ inline void RenderAddDevice(int& activePage) {
             ImGui::Spacing();
             if (PrimaryButton(T("add_start_scan"))) {
                 g_wizard.scanStarted = true;
-                g_wizard.statusMessage.clear();
+                uint64_t generation = g_wizard.BeginScan();
+                ControllerType selectedType = g_wizard.selectedType;
+                JoyConSide selectedSide = g_wizard.selectedSide;
+                JoyConOrientation selectedOrientation = g_wizard.selectedOrientation;
+                GyroSource selectedGyro = g_wizard.selectedGyro;
+                bool dualFirstDone = g_wizard.dualFirstDone;
 
-                DeviceManager::Instance().StartScan([](ConnectedJoyCon cj, ScanState state) {
+                bool started = DeviceManager::Instance().StartScan(
+                    [generation, selectedType, selectedSide, selectedOrientation,
+                     selectedGyro, dualFirstDone](ScanResult result) {
+                    if (!g_wizard.IsCurrentScan(generation)) return;
+                    ScanState state = result.state;
                     APP_LOG_DEBUG("Add Device wizard scan callback: state=%s (%d)",
                                   ScanStateName(state), static_cast<int>(state));
                     if (state == ScanState::Found) {
-                        auto& wiz = g_wizard;
                         bool ok = false;
+                        ConnectionError error;
 
-                        if (wiz.selectedType == ControllerType::SingleJoyCon) {
-                            ok = PlayerManager::Instance().AddSingleJoyCon(cj, wiz.selectedSide, wiz.selectedOrientation);
-                        } else if (wiz.selectedType == ControllerType::DualJoyCon) {
-                            if (!wiz.dualFirstDone) {
-                                ok = PlayerManager::Instance().AddDualJoyConFirstStep(cj, wiz.selectedGyro);
+                        if (selectedType == ControllerType::SingleJoyCon) {
+                            ok = PlayerManager::Instance().AddSingleJoyCon(
+                                result.controller, selectedSide, selectedOrientation, &error);
+                        } else if (selectedType == ControllerType::DualJoyCon) {
+                            if (!dualFirstDone) {
+                                ok = PlayerManager::Instance().AddDualJoyConFirstStep(
+                                    result.controller, selectedGyro, &error);
                                 if (ok) {
-                                    wiz.dualFirstDone = true;
-                                    wiz.scanStarted = false; // reset scan for second Joy-Con
-                                    wiz.step = 3; // go to dual right success page
+                                    g_wizard.PublishCompletion(generation, { true, true, {} });
                                     return;
                                 }
                             } else {
-                                ok = PlayerManager::Instance().AddDualJoyConSecondStep(cj);
+                                ok = PlayerManager::Instance().AddDualJoyConSecondStep(result.controller, &error);
                             }
                         } else {
-                            ok = PlayerManager::Instance().AddProOrGC(cj, wiz.selectedType);
+                            ok = PlayerManager::Instance().AddProOrGC(result.controller, selectedType, &error);
                         }
 
-                        if (ok) wiz.statusMessage = "OK";
-                        else wiz.statusMessage = "FAIL";
+                        g_wizard.PublishCompletion(generation, { ok, false, std::move(error) });
                         APP_LOG_INFO("Add Device wizard result: %s", ok ? "OK" : "FAIL");
-                    } else if (state == ScanState::Timeout) {
-                        g_wizard.statusMessage = "TIMEOUT";
-                        APP_LOG_WARNING("Add Device wizard: scan timeout");
-                    } else if (state == ScanState::Error) {
-                        g_wizard.statusMessage = "ERROR";
-                        APP_LOG_ERROR("Add Device wizard: scan error");
+                    } else if (state == ScanState::Timeout || state == ScanState::Error) {
+                        g_wizard.PublishCompletion(generation, { false, false, std::move(result.error) });
+                        APP_LOG_WARNING("Add Device wizard: scan ended with %s", ScanStateName(state));
                     }
                 });
+                if (!started) {
+                    g_wizard.PublishCompletion(generation, { false, false,
+                        { ConnectionErrorKind::ScanFailed, ConnectionErrorStage::StartScan,
+                          "A BLE scan is already in progress" } });
+                }
             }
             ImGui::SameLine();
             if (SecondaryButton(T("add_back"))) {
@@ -991,14 +1146,14 @@ inline void RenderAddDevice(int& activePage) {
                     g_wizard.Reset();
                     activePage = 0; // go to dashboard
                 }
-            } else if (g_wizard.statusMessage == "TIMEOUT") {
-                ImGui::TextColored(UITheme::Error, "%s", T("add_timeout"));
-                ImGui::Spacing();
-                if (SecondaryButton(T("add_back"))) g_wizard.scanStarted = false;
             } else {
-                ImGui::TextColored(UITheme::Error, "Error connecting.");
+                RenderConnectionError(g_wizard.connectionError);
                 ImGui::Spacing();
-                if (SecondaryButton(T("add_back"))) g_wizard.scanStarted = false;
+                if (SecondaryButton(T("add_back"))) {
+                    g_wizard.scanStarted = false;
+                    g_wizard.statusMessage.clear();
+                    g_wizard.connectionError = {};
+                }
             }
         }
 
@@ -1022,23 +1177,28 @@ inline void RenderAddDevice(int& activePage) {
             ImGui::Spacing();
             if (PrimaryButton(T("add_start_scan"))) {
                 g_wizard.scanStarted = true;
-                g_wizard.statusMessage.clear();
+                uint64_t generation = g_wizard.BeginScan();
 
-                DeviceManager::Instance().StartScan([&activePage](ConnectedJoyCon cj, ScanState state) {
+                bool started = DeviceManager::Instance().StartScan([generation](ScanResult result) {
+                    if (!g_wizard.IsCurrentScan(generation)) return;
+                    ScanState state = result.state;
                     APP_LOG_DEBUG("Add Device left Joy-Con scan callback: state=%s (%d)",
                                   ScanStateName(state), static_cast<int>(state));
                     if (state == ScanState::Found) {
-                        bool ok = PlayerManager::Instance().AddDualJoyConSecondStep(cj);
-                        g_wizard.statusMessage = ok ? "OK" : "FAIL";
+                        ConnectionError error;
+                        bool ok = PlayerManager::Instance().AddDualJoyConSecondStep(result.controller, &error);
+                        g_wizard.PublishCompletion(generation, { ok, false, std::move(error) });
                         APP_LOG_INFO("Left Joy-Con pairing result: %s", ok ? "OK" : "FAIL");
-                    } else if (state == ScanState::Timeout) {
-                        g_wizard.statusMessage = "TIMEOUT";
-                        APP_LOG_WARNING("Left Joy-Con scan timeout");
-                    } else if (state == ScanState::Error) {
-                        g_wizard.statusMessage = "ERROR";
-                        APP_LOG_ERROR("Left Joy-Con scan error");
+                    } else if (state == ScanState::Timeout || state == ScanState::Error) {
+                        g_wizard.PublishCompletion(generation, { false, false, std::move(result.error) });
+                        APP_LOG_WARNING("Left Joy-Con scan ended with %s", ScanStateName(state));
                     }
                 });
+                if (!started) {
+                    g_wizard.PublishCompletion(generation, { false, false,
+                        { ConnectionErrorKind::ScanFailed, ConnectionErrorStage::StartScan,
+                          "A BLE scan is already in progress" } });
+                }
             }
         } else {
             if (g_wizard.statusMessage.empty()) {
@@ -1057,14 +1217,14 @@ inline void RenderAddDevice(int& activePage) {
                     g_wizard.Reset();
                     activePage = 0;
                 }
-            } else if (g_wizard.statusMessage == "TIMEOUT") {
-                ImGui::TextColored(UITheme::Error, "%s", T("add_timeout"));
-                ImGui::Spacing();
-                if (SecondaryButton(T("add_back"))) g_wizard.scanStarted = false;
             } else {
-                ImGui::TextColored(UITheme::Error, "Error connecting.");
+                RenderConnectionError(g_wizard.connectionError);
                 ImGui::Spacing();
-                if (SecondaryButton(T("add_back"))) g_wizard.scanStarted = false;
+                if (SecondaryButton(T("add_back"))) {
+                    g_wizard.scanStarted = false;
+                    g_wizard.statusMessage.clear();
+                    g_wizard.connectionError = {};
+                }
             }
         }
     }

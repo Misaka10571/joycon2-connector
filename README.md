@@ -117,6 +117,18 @@ Install the following via the **Visual Studio Installer**:
 **Connection Error / Unable to Connect:**
 Please make sure the controller is powered off. After starting the scan, press and hold the pairing button to power it on. Once the connection is successful, release the pairing button.
 
+The app displays the failed stage, a specific reason, and the original Windows, GATT, or ViGEm error code. Errors with a reliable remedy include a "Possible solutions ⓘ" button. Common cases are:
+
+| Message | Common cause | Suggested action |
+|---------|--------------|------------------|
+| Bluetooth adapter is not ready or unavailable | Bluetooth is off or the adapter/driver failed; a common code is `HRESULT 0x800710DF` | Toggle Bluetooth, then re-enable or update the adapter in Device Manager |
+| No controller was found before timeout | The controller is not advertising, is out of range, has low battery, or is in connection cooldown | Power it off, start scanning, and hold the pairing button; move closer; wait a few minutes if needed |
+| Controller found but Bluetooth connection failed | Pairing button released too soon, link loss, interference, or driver failure | Scan again while holding the pairing button; remove old pairing; re-enable the adapter |
+| Bluetooth service or input notification inaccessible | Permissions, stale pairing, or Windows Bluetooth stack failure | Remove old pairing, check Bluetooth permissions, and pair again |
+| Virtual controller could not be created | ViGEmBus missing/incompatible or all virtual slots occupied | Install or repair ViGEmBus, restart Windows, and close other virtual-controller apps |
+
+Protocol and internal errors may have no reliable generic remedy. In those cases the UI shows only the failed stage and original code, without a solutions button.
+
 **Controller stops connecting after multiple attempts:**
 This is a known controller-level cooldown behavior — not an OS or Bluetooth stack issue. Simply wait a few minutes and try again.
 

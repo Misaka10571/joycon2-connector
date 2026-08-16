@@ -501,16 +501,21 @@ public:
     std::vector<ProControllerPlayer>& GetProPlayers() { return proPlayers; }
 
     // Add a Single JoyCon player from async scan result
-    bool AddSingleJoyCon(ConnectedJoyCon cj, JoyConSide side, JoyConOrientation orientation) {
+    bool AddSingleJoyCon(ConnectedJoyCon cj, JoyConSide side, JoyConOrientation orientation,
+                         ConnectionError* error = nullptr) {
         std::lock_guard<std::mutex> operationLock(playerOperationsMutex);
-        if (shuttingDown.load(std::memory_order_acquire)) return false;
+        if (error) *error = {};
+        if (shuttingDown.load(std::memory_order_acquire))
+            return ReportConnectionError(error, ConnectionErrorKind::Internal,
+                ConnectionErrorStage::StorePlayer);
 
         APP_LOG_INFO("Adding single Joy-Con (address: %llu, side: %d, orientation: %d)",
                      cj.bleAddress, static_cast<int>(side), static_cast<int>(orientation));
         if (!cj.inputChar) {
             APP_LOG_ERROR("Single Joy-Con has no input-report characteristic (address: %llu); cannot subscribe",
                           cj.bleAddress);
-            return false;
+            return ReportConnectionError(error, ConnectionErrorKind::UnsupportedController,
+                ConnectionErrorStage::RegisterInput);
         }
         if (!cj.writeChar) {
             APP_LOG_WARNING("Single Joy-Con has no write-command characteristic (address: %llu); "
@@ -522,9 +527,21 @@ public:
         bool xboxMode = ConfigManager::Instance().GetDeviceSettings(cj.bleAddress).useXboxEmulation;
 
         PVIGEM_TARGET target = xboxMode ? vigem.AllocX360() : vigem.AllocDS4();
-        if (!target || !vigem.AddTarget(target)) {
+        if (!target) {
             APP_LOG_ERROR("Failed to allocate/add ViGEm target for single Joy-Con");
-            return false;
+            return ReportConnectionError(error, ConnectionErrorKind::VirtualControllerUnknown,
+                ConnectionErrorStage::CreateVirtualController, "ViGEm target allocation failed");
+        }
+        VIGEM_ERROR vigemError = vigem.AddTarget(target);
+        if (!VIGEM_SUCCESS(vigemError)) {
+            std::string detail = ViGEmManager::DescribeError(vigemError);
+            APP_LOG_ERROR("Failed to add ViGEm target for single Joy-Con: %s", detail.c_str());
+            vigem_target_free(target);
+            return ReportConnectionError(error,
+                ViGEmManager::HasSuggestedSolution(vigemError)
+                    ? ConnectionErrorKind::VirtualController
+                    : ConnectionErrorKind::VirtualControllerUnknown,
+                ConnectionErrorStage::CreateVirtualController, std::move(detail));
         }
 
         auto newPlayer = std::make_unique<SingleJoyConPlayer>(cj, target, side, orientation);
@@ -750,7 +767,8 @@ public:
             else
                 vigem_target_ds4_unregister_notification(target);
             vigem.RemoveTarget(target);
-            return false;
+            return ReportConnectionError(error, ConnectionErrorKind::NotificationSubscription,
+                ConnectionErrorStage::RegisterInput, BluetoothLog::DescribeHResultError(e));
         } catch (...) {
             APP_LOG_ERROR("Single Joy-Con input callback registration threw an unknown exception (address: %llu)",
                           cj.bleAddress);
@@ -759,10 +777,12 @@ public:
             else
                 vigem_target_ds4_unregister_notification(target);
             vigem.RemoveTarget(target);
-            return false;
+            return ReportConnectionError(error, ConnectionErrorKind::Internal,
+                ConnectionErrorStage::RegisterInput);
         }
 
         GattCommunicationStatus status = GattCommunicationStatus::Success;
+        std::string subscribeDetail;
         try {
             status = player.joycon.inputChar.WriteClientCharacteristicConfigurationDescriptorAsync(
                 GattClientCharacteristicConfigurationDescriptorValue::Notify).get();
@@ -770,6 +790,7 @@ public:
             APP_LOG_ERROR("Single Joy-Con input notification subscription threw (address: %llu): %s",
                           cj.bleAddress, BluetoothLog::DescribeHResultError(e).c_str());
             status = GattCommunicationStatus::Unreachable;
+            subscribeDetail = BluetoothLog::DescribeHResultError(e);
         } catch (...) {
             APP_LOG_ERROR("Single Joy-Con input notification subscription threw an unknown exception (address: %llu)",
                           cj.bleAddress);
@@ -782,6 +803,21 @@ public:
         } else {
             APP_LOG_ERROR("Single Joy-Con input notification subscription failed (address: %llu): %s",
                           cj.bleAddress, BluetoothLog::DescribeGattStatus(status).c_str());
+            DisableInputCallback(player.joycon.inputChar,
+                                 player.inputChangedToken,
+                                 player.inputCallbackGate);
+            if (xboxMode)
+                vigem_target_x360_unregister_notification(target);
+            else
+                vigem_target_ds4_unregister_notification(target);
+            vigem.RemoveTarget(target);
+            return ReportConnectionError(error,
+                status == GattCommunicationStatus::AccessDenied
+                    ? ConnectionErrorKind::GattAccessDenied
+                    : ConnectionErrorKind::NotificationSubscription,
+                ConnectionErrorStage::SubscribeNotifications,
+                subscribeDetail.empty() ? BluetoothLog::DescribeGattStatus(status)
+                                        : std::move(subscribeDetail));
         }
 
         if (player.joycon.writeChar) {
@@ -805,7 +841,8 @@ public:
                     vigem_target_ds4_unregister_notification(target);
                 vigem.RemoveTarget(target);
                 APP_LOG_ERROR("Failed to store single Joy-Con player (address: %llu)", cj.bleAddress);
-                return false;
+                return ReportConnectionError(error, ConnectionErrorKind::Internal,
+                    ConnectionErrorStage::StorePlayer);
             }
         }
 
@@ -814,7 +851,7 @@ public:
 
         APP_LOG_INFO("Single Joy-Con add completed (success: %d, total players: %d)",
                      (status == GattCommunicationStatus::Success) ? 1 : 0, GetPlayerCount());
-        return (status == GattCommunicationStatus::Success);
+        return true;
     }
 
     // Clear pending dual JoyCon state (release BLE references)
@@ -824,16 +861,21 @@ public:
     }
 
     // Add Dual JoyCon player (needs two separate scans)
-    bool AddDualJoyConFirstStep(ConnectedJoyCon rightJoyCon, GyroSource gyroSource) {
+    bool AddDualJoyConFirstStep(ConnectedJoyCon rightJoyCon, GyroSource gyroSource,
+                               ConnectionError* error = nullptr) {
         std::lock_guard<std::mutex> operationLock(playerOperationsMutex);
-        if (shuttingDown.load(std::memory_order_acquire)) return false;
+        if (error) *error = {};
+        if (shuttingDown.load(std::memory_order_acquire))
+            return ReportConnectionError(error, ConnectionErrorKind::Internal,
+                ConnectionErrorStage::StorePlayer);
 
         APP_LOG_INFO("Dual Joy-Con first step: right Joy-Con paired (address: %llu, gyro: %d)",
                      rightJoyCon.bleAddress, static_cast<int>(gyroSource));
         if (!rightJoyCon.inputChar) {
             APP_LOG_ERROR("Right Joy-Con has no input-report characteristic (address: %llu); cannot subscribe",
                           rightJoyCon.bleAddress);
-            return false;
+            return ReportConnectionError(error, ConnectionErrorKind::UnsupportedController,
+                ConnectionErrorStage::RegisterInput);
         }
         if (!rightJoyCon.writeChar) {
             APP_LOG_WARNING("Right Joy-Con has no write-command characteristic (address: %llu); "
@@ -852,22 +894,27 @@ public:
         return true;
     }
 
-    bool AddDualJoyConSecondStep(ConnectedJoyCon leftJoyCon) {
+    bool AddDualJoyConSecondStep(ConnectedJoyCon leftJoyCon, ConnectionError* error = nullptr) {
         std::lock_guard<std::mutex> operationLock(playerOperationsMutex);
-        if (shuttingDown.load(std::memory_order_acquire)) return false;
+        if (error) *error = {};
+        if (shuttingDown.load(std::memory_order_acquire))
+            return ReportConnectionError(error, ConnectionErrorKind::Internal,
+                ConnectionErrorStage::StorePlayer);
 
         APP_LOG_INFO("Dual Joy-Con second step: left Joy-Con paired (address: %llu)", leftJoyCon.bleAddress);
         if (!leftJoyCon.inputChar) {
             APP_LOG_ERROR("Left Joy-Con has no input-report characteristic (address: %llu); cannot subscribe",
                           leftJoyCon.bleAddress);
             ClearPendingDualUnlocked();
-            return false;
+            return ReportConnectionError(error, ConnectionErrorKind::UnsupportedController,
+                ConnectionErrorStage::RegisterInput);
         }
         if (!pendingDualRight.inputChar) {
             APP_LOG_ERROR("Pending right Joy-Con has no input-report characteristic (address: %llu); cannot subscribe",
                           pendingDualRight.bleAddress);
             ClearPendingDualUnlocked();
-            return false;
+            return ReportConnectionError(error, ConnectionErrorKind::UnsupportedController,
+                ConnectionErrorStage::RegisterInput);
         }
         if (leftJoyCon.writeChar) {
             SendCustomCommands(leftJoyCon.writeChar);
@@ -880,9 +927,21 @@ public:
         bool xboxMode = ConfigManager::Instance().GetDeviceSettings(pendingDualRight.bleAddress).useXboxEmulation;
 
         PVIGEM_TARGET target = xboxMode ? vigem.AllocX360() : vigem.AllocDS4();
-        if (!target || !vigem.AddTarget(target)) {
+        if (!target) {
             APP_LOG_ERROR("Failed to allocate/add ViGEm target for dual Joy-Con");
-            return false;
+            return ReportConnectionError(error, ConnectionErrorKind::VirtualControllerUnknown,
+                ConnectionErrorStage::CreateVirtualController, "ViGEm target allocation failed");
+        }
+        VIGEM_ERROR vigemError = vigem.AddTarget(target);
+        if (!VIGEM_SUCCESS(vigemError)) {
+            std::string detail = ViGEmManager::DescribeError(vigemError);
+            APP_LOG_ERROR("Failed to add ViGEm target for dual Joy-Con: %s", detail.c_str());
+            vigem_target_free(target);
+            return ReportConnectionError(error,
+                ViGEmManager::HasSuggestedSolution(vigemError)
+                    ? ConnectionErrorKind::VirtualController
+                    : ConnectionErrorKind::VirtualControllerUnknown,
+                ConnectionErrorStage::CreateVirtualController, std::move(detail));
         }
 
         auto dp = std::make_unique<DualJoyConPlayer>();
@@ -925,15 +984,18 @@ public:
                           BluetoothLog::DescribeHResultError(e).c_str());
             CleanupUnpublishedDual(*dp);
             ClearPendingDualUnlocked();
-            return false;
+            return ReportConnectionError(error, ConnectionErrorKind::NotificationSubscription,
+                ConnectionErrorStage::RegisterInput, BluetoothLog::DescribeHResultError(e));
         } catch (...) {
             APP_LOG_ERROR("Dual Joy-Con left input callback registration threw an unknown exception");
             CleanupUnpublishedDual(*dp);
             ClearPendingDualUnlocked();
-            return false;
+            return ReportConnectionError(error, ConnectionErrorKind::Internal,
+                ConnectionErrorStage::RegisterInput);
         }
 
         GattCommunicationStatus leftSubscribeStatus = GattCommunicationStatus::Success;
+        std::string leftSubscribeDetail;
         try {
             leftSubscribeStatus = dp->leftJoyCon.inputChar.WriteClientCharacteristicConfigurationDescriptorAsync(
                 GattClientCharacteristicConfigurationDescriptorValue::Notify).get();
@@ -941,6 +1003,7 @@ public:
             APP_LOG_ERROR("Dual Joy-Con left notification subscription threw (address: %llu): %s",
                           leftJoyCon.bleAddress, BluetoothLog::DescribeHResultError(e).c_str());
             leftSubscribeStatus = GattCommunicationStatus::Unreachable;
+            leftSubscribeDetail = BluetoothLog::DescribeHResultError(e);
         } catch (...) {
             APP_LOG_ERROR("Dual Joy-Con left notification subscription threw an unknown exception (address: %llu)",
                           leftJoyCon.bleAddress);
@@ -954,6 +1017,15 @@ public:
             APP_LOG_ERROR("Dual Joy-Con left input notification subscription failed (address: %llu): %s",
                           leftJoyCon.bleAddress,
                           BluetoothLog::DescribeGattStatus(leftSubscribeStatus).c_str());
+            CleanupUnpublishedDual(*dp);
+            ClearPendingDualUnlocked();
+            return ReportConnectionError(error,
+                leftSubscribeStatus == GattCommunicationStatus::AccessDenied
+                    ? ConnectionErrorKind::GattAccessDenied
+                    : ConnectionErrorKind::NotificationSubscription,
+                ConnectionErrorStage::SubscribeNotifications,
+                leftSubscribeDetail.empty() ? BluetoothLog::DescribeGattStatus(leftSubscribeStatus)
+                                            : std::move(leftSubscribeDetail));
         }
 
         try {
@@ -973,15 +1045,18 @@ public:
                           BluetoothLog::DescribeHResultError(e).c_str());
             CleanupUnpublishedDual(*dp);
             ClearPendingDualUnlocked();
-            return false;
+            return ReportConnectionError(error, ConnectionErrorKind::NotificationSubscription,
+                ConnectionErrorStage::RegisterInput, BluetoothLog::DescribeHResultError(e));
         } catch (...) {
             APP_LOG_ERROR("Dual Joy-Con right input callback registration threw an unknown exception");
             CleanupUnpublishedDual(*dp);
             ClearPendingDualUnlocked();
-            return false;
+            return ReportConnectionError(error, ConnectionErrorKind::Internal,
+                ConnectionErrorStage::RegisterInput);
         }
 
         GattCommunicationStatus rightSubscribeStatus = GattCommunicationStatus::Success;
+        std::string rightSubscribeDetail;
         try {
             rightSubscribeStatus = dp->rightJoyCon.inputChar.WriteClientCharacteristicConfigurationDescriptorAsync(
                 GattClientCharacteristicConfigurationDescriptorValue::Notify).get();
@@ -989,6 +1064,7 @@ public:
             APP_LOG_ERROR("Dual Joy-Con right notification subscription threw (address: %llu): %s",
                           pendingDualRight.bleAddress, BluetoothLog::DescribeHResultError(e).c_str());
             rightSubscribeStatus = GattCommunicationStatus::Unreachable;
+            rightSubscribeDetail = BluetoothLog::DescribeHResultError(e);
         } catch (...) {
             APP_LOG_ERROR("Dual Joy-Con right notification subscription threw an unknown exception (address: %llu)",
                           pendingDualRight.bleAddress);
@@ -1002,6 +1078,15 @@ public:
             APP_LOG_ERROR("Dual Joy-Con right input notification subscription failed (address: %llu): %s",
                           pendingDualRight.bleAddress,
                           BluetoothLog::DescribeGattStatus(rightSubscribeStatus).c_str());
+            CleanupUnpublishedDual(*dp);
+            ClearPendingDualUnlocked();
+            return ReportConnectionError(error,
+                rightSubscribeStatus == GattCommunicationStatus::AccessDenied
+                    ? ConnectionErrorKind::GattAccessDenied
+                    : ConnectionErrorKind::NotificationSubscription,
+                ConnectionErrorStage::SubscribeNotifications,
+                rightSubscribeDetail.empty() ? BluetoothLog::DescribeGattStatus(rightSubscribeStatus)
+                                             : std::move(rightSubscribeDetail));
         }
 
         try {
@@ -1037,26 +1122,40 @@ public:
             APP_LOG_ERROR("Failed to start dual Joy-Con update thread");
             CleanupUnpublishedDual(*dp);
             ClearPendingDualUnlocked();
-            return false;
+            return ReportConnectionError(error, ConnectionErrorKind::Internal,
+                ConnectionErrorStage::StartWorker);
         }
 
-        dualPlayers.push_back(std::move(dp));
+        try {
+            dualPlayers.push_back(std::move(dp));
+        } catch (...) {
+            CleanupUnpublishedDual(*dp);
+            ClearPendingDualUnlocked();
+            APP_LOG_ERROR("Failed to store dual Joy-Con player");
+            return ReportConnectionError(error, ConnectionErrorKind::Internal,
+                ConnectionErrorStage::StorePlayer);
+        }
         ClearPendingDualUnlocked();  // Release extra BLE references so disconnect works for right Joy-Con
         APP_LOG_INFO("Dual Joy-Con add completed (total players: %d)", GetPlayerCount());
         return true;
     }
 
     // Add Pro Controller or NSO GC
-    bool AddProOrGC(ConnectedJoyCon controller, ControllerType type) {
+    bool AddProOrGC(ConnectedJoyCon controller, ControllerType type,
+                    ConnectionError* error = nullptr) {
         std::lock_guard<std::mutex> operationLock(playerOperationsMutex);
-        if (shuttingDown.load(std::memory_order_acquire)) return false;
+        if (error) *error = {};
+        if (shuttingDown.load(std::memory_order_acquire))
+            return ReportConnectionError(error, ConnectionErrorKind::Internal,
+                ConnectionErrorStage::StorePlayer);
 
         APP_LOG_INFO("Adding Pro/NSO-GC controller (address: %llu, type: %d)",
                      controller.bleAddress, static_cast<int>(type));
         if (!controller.inputChar) {
             APP_LOG_ERROR("Pro/NSO-GC controller has no input-report characteristic (address: %llu); cannot subscribe",
                           controller.bleAddress);
-            return false;
+            return ReportConnectionError(error, ConnectionErrorKind::UnsupportedController,
+                ConnectionErrorStage::RegisterInput);
         }
         if (!controller.writeChar) {
             APP_LOG_WARNING("Pro/NSO-GC controller has no write-command characteristic (address: %llu); "
@@ -1068,9 +1167,21 @@ public:
         bool xboxMode = ConfigManager::Instance().GetDeviceSettings(controller.bleAddress).useXboxEmulation;
 
         PVIGEM_TARGET target = xboxMode ? vigem.AllocX360() : vigem.AllocDS4();
-        if (!target || !vigem.AddTarget(target)) {
+        if (!target) {
             APP_LOG_ERROR("Failed to allocate/add ViGEm target for Pro/NSO-GC controller");
-            return false;
+            return ReportConnectionError(error, ConnectionErrorKind::VirtualControllerUnknown,
+                ConnectionErrorStage::CreateVirtualController, "ViGEm target allocation failed");
+        }
+        VIGEM_ERROR vigemError = vigem.AddTarget(target);
+        if (!VIGEM_SUCCESS(vigemError)) {
+            std::string detail = ViGEmManager::DescribeError(vigemError);
+            APP_LOG_ERROR("Failed to add ViGEm target for Pro/NSO-GC controller: %s", detail.c_str());
+            vigem_target_free(target);
+            return ReportConnectionError(error,
+                ViGEmManager::HasSuggestedSolution(vigemError)
+                    ? ConnectionErrorKind::VirtualController
+                    : ConnectionErrorKind::VirtualControllerUnknown,
+                ConnectionErrorStage::CreateVirtualController, std::move(detail));
         }
 
         if (type == ControllerType::ProController) {
@@ -1087,6 +1198,7 @@ public:
         auto inputCallbackGate = std::make_shared<InputCallbackGate>();
         winrt::event_token inputChangedToken{};
 
+        try {
         if (type == ControllerType::ProController) {
             if (xboxMode) {
                 inputChangedToken = controller.inputChar.ValueChanged([target, swapFlag, inputCallbackGate](GattCharacteristic const&, GattValueChangedEventArgs const& args) mutable {
@@ -1150,8 +1262,22 @@ public:
                 });
             }
         }
+        } catch (const winrt::hresult_error& e) {
+            APP_LOG_ERROR("Pro/NSO-GC input callback registration threw (address: %llu): %s",
+                          controller.bleAddress, BluetoothLog::DescribeHResultError(e).c_str());
+            vigem.RemoveTarget(target);
+            return ReportConnectionError(error, ConnectionErrorKind::NotificationSubscription,
+                ConnectionErrorStage::RegisterInput, BluetoothLog::DescribeHResultError(e));
+        } catch (...) {
+            APP_LOG_ERROR("Pro/NSO-GC input callback registration threw an unknown exception (address: %llu)",
+                          controller.bleAddress);
+            vigem.RemoveTarget(target);
+            return ReportConnectionError(error, ConnectionErrorKind::Internal,
+                ConnectionErrorStage::RegisterInput);
+        }
 
         GattCommunicationStatus proStatus = GattCommunicationStatus::Success;
+        std::string proSubscribeDetail;
         try {
             proStatus = controller.inputChar.WriteClientCharacteristicConfigurationDescriptorAsync(
                 GattClientCharacteristicConfigurationDescriptorValue::Notify).get();
@@ -1159,6 +1285,7 @@ public:
             APP_LOG_ERROR("Pro/NSO-GC notification subscription threw (address: %llu): %s",
                           controller.bleAddress, BluetoothLog::DescribeHResultError(e).c_str());
             proStatus = GattCommunicationStatus::Unreachable;
+            proSubscribeDetail = BluetoothLog::DescribeHResultError(e);
         } catch (...) {
             APP_LOG_ERROR("Pro/NSO-GC notification subscription threw an unknown exception (address: %llu)",
                           controller.bleAddress);
@@ -1172,6 +1299,15 @@ public:
             APP_LOG_ERROR("Pro/NSO-GC input notification subscription failed (address: %llu): %s",
                           controller.bleAddress,
                           BluetoothLog::DescribeGattStatus(proStatus).c_str());
+            DisableInputCallback(controller.inputChar, inputChangedToken, inputCallbackGate);
+            vigem.RemoveTarget(target);
+            return ReportConnectionError(error,
+                proStatus == GattCommunicationStatus::AccessDenied
+                    ? ConnectionErrorKind::GattAccessDenied
+                    : ConnectionErrorKind::NotificationSubscription,
+                ConnectionErrorStage::SubscribeNotifications,
+                proSubscribeDetail.empty() ? BluetoothLog::DescribeGattStatus(proStatus)
+                                           : std::move(proSubscribeDetail));
         }
 
         if (controller.writeChar) {
@@ -1181,7 +1317,15 @@ public:
             EmitSound(controller.writeChar);
         }
 
-        proPlayers.push_back({ controller, target, type, nullptr, swapFlag, rawVibFlag, xboxModeFlag, controller.bleAddress });
+        try {
+            proPlayers.push_back({ controller, target, type, nullptr, swapFlag, rawVibFlag, xboxModeFlag, controller.bleAddress });
+        } catch (...) {
+            DisableInputCallback(controller.inputChar, inputChangedToken, inputCallbackGate);
+            vigem.RemoveTarget(target);
+            APP_LOG_ERROR("Failed to store Pro/NSO-GC controller player");
+            return ReportConnectionError(error, ConnectionErrorKind::Internal,
+                ConnectionErrorStage::StorePlayer);
+        }
 
         // Register vibration callback for pro/GC controller
         auto& pp = proPlayers.back();
