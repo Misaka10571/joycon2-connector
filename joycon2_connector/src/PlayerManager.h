@@ -206,7 +206,7 @@ struct PlayerConfig {
     ControllerType controllerType;
     JoyConSide joyconSide = JoyConSide::Left;
     JoyConOrientation joyconOrientation = JoyConOrientation::Upright;
-    GyroSource gyroSource = GyroSource::Both;
+    GyroSource gyroSource = GyroSource::Right;
 };
 
 struct SingleJoyConPlayer {
@@ -372,6 +372,15 @@ inline void ApplyButtonMappingXUSB(XUSB_REPORT& report, ButtonMapping mapping) {
     case ButtonMapping::DPAD_RIGHT: report.wButtons |= XUSB_GAMEPAD_DPAD_RIGHT; break;
     default: break;
     }
+}
+
+// Optical mouse coordinates are absolute 16-bit values that wrap around.
+// Convert two consecutive readings to a signed delta without 0xFFFF jump artifacts.
+inline int16_t OpticalMouseDelta(int16_t current, int16_t previous) {
+    int32_t delta = static_cast<int32_t>(current) - static_cast<int32_t>(previous);
+    if (delta > 32767) delta -= 65536;
+    else if (delta < -32768) delta += 65536;
+    return static_cast<int16_t>(delta);
 }
 
 // GL/GR application for Pro controllers (Xbox 360 mode)
@@ -560,8 +569,8 @@ public:
                         playerPtr->lastOpticalY = rawY;
                         playerPtr->firstOpticalRead = false;
                     } else {
-                        int16_t dx = rawX - playerPtr->lastOpticalX;
-                        int16_t dy = rawY - playerPtr->lastOpticalY;
+                        int16_t dx = OpticalMouseDelta(rawX, playerPtr->lastOpticalX);
+                        int16_t dy = OpticalMouseDelta(rawY, playerPtr->lastOpticalY);
                         playerPtr->lastOpticalX = rawX;
                         playerPtr->lastOpticalY = rawY;
 
@@ -606,7 +615,7 @@ public:
                                     input.type = INPUT_MOUSE;
                                     input.mi.dx = moveX;
                                     input.mi.dy = moveY;
-                                    input.mi.dwFlags = MOUSEEVENTF_MOVE | 0x2000;
+                                    input.mi.dwFlags = MOUSEEVENTF_MOVE;
                                     SendInput(1, &input, sizeof(INPUT));
                                 }
                             }
@@ -706,6 +715,7 @@ public:
                 vigem_target_x360_update(ViGEmManager::Instance().GetClient(), playerPtr->ds4Controller, xreport);
             } else {
                 DS4_REPORT_EX report = GenerateDS4Report(buffer, joyconSide, joyconOrientation);
+                ApplyGyroSensitivity(report, ConfigManager::Instance().config.gyroSensitivity);
                 if (playerPtr->swapABXY) ApplyABXYSwap(report);
                 vigem_target_ds4_update_ex(ViGEmManager::Instance().GetClient(), playerPtr->ds4Controller, report);
             }
@@ -751,7 +761,7 @@ public:
     // Clear pending dual JoyCon state (release BLE references)
     void ClearPendingDual() {
         pendingDualRight = ConnectedJoyCon{};
-        pendingDualGyro = GyroSource::Both;
+        pendingDualGyro = GyroSource::Right;
     }
 
     // Add Dual JoyCon player (needs two separate scans)
@@ -917,6 +927,7 @@ public:
                     vigem_target_x360_update(ViGEmManager::Instance().GetClient(), ptr->ds4Controller, xreport);
                 } else {
                     DS4_REPORT_EX report = GenerateDualJoyConDS4Report(*leftBuf, *rightBuf, ptr->gyroSource);
+                    ApplyGyroSensitivity(report, ConfigManager::Instance().config.gyroSensitivity);
                     if (ptr->swapABXY) ApplyABXYSwap(report);
                     vigem_target_ds4_update_ex(ViGEmManager::Instance().GetClient(), ptr->ds4Controller, report);
                 }
@@ -987,6 +998,7 @@ public:
                     std::vector<uint8_t> buffer(reader.UnconsumedBufferLength());
                     reader.ReadBytes(buffer);
                     DS4_REPORT_EX report = GenerateProControllerReport(buffer);
+                    ApplyGyroSensitivity(report, ConfigManager::Instance().config.gyroSensitivity);
                     ApplyGLGRMappings(report, buffer);
                     if (swapFlag->load(std::memory_order_relaxed)) ApplyABXYSwap(report);
                     HandleSpecialProButtons(buffer);
@@ -1013,6 +1025,7 @@ public:
                     std::vector<uint8_t> buffer(reader.UnconsumedBufferLength());
                     reader.ReadBytes(buffer);
                     DS4_REPORT_EX report = GenerateNSOGCReport(buffer);
+                    ApplyGyroSensitivity(report, ConfigManager::Instance().config.gyroSensitivity);
                     if (swapFlag->load(std::memory_order_relaxed)) ApplyABXYSwap(report);
                     vigem_target_ds4_update_ex(ViGEmManager::Instance().GetClient(), target, report);
                 });
@@ -1236,7 +1249,7 @@ private:
                             input.type = INPUT_MOUSE;
                             input.mi.dx = moveX;
                             input.mi.dy = moveY;
-                            input.mi.dwFlags = MOUSEEVENTF_MOVE | 0x2000;
+                            input.mi.dwFlags = MOUSEEVENTF_MOVE;
                             SendInput(1, &input, sizeof(INPUT));
                         }
 
@@ -1254,7 +1267,7 @@ private:
                                 input.type = INPUT_MOUSE;
                                 input.mi.dx = finalX;
                                 input.mi.dy = finalY;
-                                input.mi.dwFlags = MOUSEEVENTF_MOVE | 0x2000;
+                                input.mi.dwFlags = MOUSEEVENTF_MOVE;
                                 SendInput(1, &input, sizeof(INPUT));
                             }
                             st.remainX = 0.0f;
@@ -1280,5 +1293,5 @@ private:
 
     // Pending dual JoyCon state
     ConnectedJoyCon pendingDualRight;
-    GyroSource pendingDualGyro = GyroSource::Both;
+    GyroSource pendingDualGyro = GyroSource::Right;
 };

@@ -38,6 +38,9 @@ std::pair<int16_t, int16_t> GetRawOpticalMouse(const std::vector<uint8_t>& buffe
 StickData DecodeJoystick(const std::vector<uint8_t>& buffer, JoyConSide side, JoyConOrientation orientation);
 MotionData DecodeMotion(const std::vector<uint8_t>& buffer);
 
+// Multiply DS4 gyro values by a user-configurable sensitivity factor (1.0 = raw values).
+void ApplyGyroSensitivity(DS4_REPORT_EX& report, float sensitivity);
+
 // Post-process a DS4 report to swap A⇄B (CROSS⇄CIRCLE) and X⇄Y (SQUARE⇄TRIANGLE)
 inline void ApplyABXYSwap(DS4_REPORT_EX& report) {
     USHORT oldButtons = report.Report.wButtons;

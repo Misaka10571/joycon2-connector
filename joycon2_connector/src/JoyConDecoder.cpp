@@ -519,6 +519,22 @@ MotionData DecodeMotion(const std::vector<uint8_t>& buffer) {
     return m;
 }
 
+void ApplyGyroSensitivity(DS4_REPORT_EX& report, float sensitivity) {
+    if (sensitivity <= 0.0f) sensitivity = 1.0f;
+    if (sensitivity == 1.0f) return;
+
+    auto scale = [sensitivity](int16_t raw) -> int16_t {
+        float value = static_cast<float>(raw) * sensitivity;
+        if (value > 32767.0f) return 32767;
+        if (value < -32768.0f) return -32768;
+        return static_cast<int16_t>(value);
+    };
+
+    report.Report.wGyroX = scale(report.Report.wGyroX);
+    report.Report.wGyroY = scale(report.Report.wGyroY);
+    report.Report.wGyroZ = scale(report.Report.wGyroZ);
+}
+
 // ============================================================
 // XUSB (Xbox 360) report generators — no gyro or touchpad
 // ============================================================
