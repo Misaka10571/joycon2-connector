@@ -5,6 +5,8 @@
 #include "BLECommands.h"
 #include "ConfigManager.h"
 #include "JoyConDecoder.h"
+#include "Logger.h"
+#include "BluetoothLog.h"
 #include <vector>
 #include <memory>
 #include <thread>
@@ -476,11 +478,27 @@ public:
 
     // Add a Single JoyCon player from async scan result
     bool AddSingleJoyCon(ConnectedJoyCon cj, JoyConSide side, JoyConOrientation orientation) {
+        APP_LOG_INFO("Adding single Joy-Con (address: %llu, side: %d, orientation: %d)",
+                     cj.bleAddress, static_cast<int>(side), static_cast<int>(orientation));
+        if (!cj.inputChar) {
+            APP_LOG_ERROR("Single Joy-Con has no input-report characteristic (address: %llu); cannot subscribe",
+                          cj.bleAddress);
+            return false;
+        }
+        if (!cj.writeChar) {
+            APP_LOG_WARNING("Single Joy-Con has no write-command characteristic (address: %llu); "
+                            "LED/vibration/command features will be unavailable",
+                            cj.bleAddress);
+        }
+
         auto& vigem = ViGEmManager::Instance();
         bool xboxMode = ConfigManager::Instance().GetDeviceSettings(cj.bleAddress).useXboxEmulation;
 
         PVIGEM_TARGET target = xboxMode ? vigem.AllocX360() : vigem.AllocDS4();
-        if (!target || !vigem.AddTarget(target)) return false;
+        if (!target || !vigem.AddTarget(target)) {
+            APP_LOG_ERROR("Failed to allocate/add ViGEm target for single Joy-Con");
+            return false;
+        }
 
         singlePlayers.push_back(std::make_unique<SingleJoyConPlayer>(cj, target, side, orientation));
         auto& player = *singlePlayers.back();
@@ -522,6 +540,7 @@ public:
 
                 if (chatPressed && !playerPtr->wasChatPressed) {
                     playerPtr->mouseMode = (playerPtr->mouseMode + 1) % 4;
+                    APP_LOG_DEBUG("Single Joy-Con CHAT button pressed; mouse mode changed to %d", playerPtr->mouseMode);
                     uint8_t ledPattern = 0x01;
                     if (playerPtr->mouseMode == 1) ledPattern = 0x02;
                     else if (playerPtr->mouseMode == 2) ledPattern = 0x04;
@@ -692,8 +711,27 @@ public:
             }
         });
 
-        auto status = player.joycon.inputChar.WriteClientCharacteristicConfigurationDescriptorAsync(
-            GattClientCharacteristicConfigurationDescriptorValue::Notify).get();
+        GattCommunicationStatus status = GattCommunicationStatus::Success;
+        try {
+            status = player.joycon.inputChar.WriteClientCharacteristicConfigurationDescriptorAsync(
+                GattClientCharacteristicConfigurationDescriptorValue::Notify).get();
+        } catch (const winrt::hresult_error& e) {
+            APP_LOG_ERROR("Single Joy-Con input notification subscription threw (address: %llu): %s",
+                          cj.bleAddress, BluetoothLog::DescribeHResultError(e).c_str());
+            status = GattCommunicationStatus::Unreachable;
+        } catch (...) {
+            APP_LOG_ERROR("Single Joy-Con input notification subscription threw an unknown exception (address: %llu)",
+                          cj.bleAddress);
+            status = GattCommunicationStatus::Unreachable;
+        }
+
+        if (status == GattCommunicationStatus::Success) {
+            APP_LOG_INFO("Single Joy-Con input notification subscription succeeded (address: %llu)",
+                         cj.bleAddress);
+        } else {
+            APP_LOG_ERROR("Single Joy-Con input notification subscription failed (address: %llu): %s",
+                          cj.bleAddress, BluetoothLog::DescribeGattStatus(status).c_str());
+        }
 
         if (player.joycon.writeChar) {
             SendCustomCommands(player.joycon.writeChar);
@@ -705,6 +743,8 @@ public:
         // Start mouse interpolation thread (shared across all single joycons)
         StartMouseInterpolThread();
 
+        APP_LOG_INFO("Single Joy-Con add completed (success: %d, total players: %d)",
+                     (status == GattCommunicationStatus::Success) ? 1 : 0, GetPlayerCount());
         return (status == GattCommunicationStatus::Success);
     }
 
@@ -716,6 +756,19 @@ public:
 
     // Add Dual JoyCon player (needs two separate scans)
     bool AddDualJoyConFirstStep(ConnectedJoyCon rightJoyCon, GyroSource gyroSource) {
+        APP_LOG_INFO("Dual Joy-Con first step: right Joy-Con paired (address: %llu, gyro: %d)",
+                     rightJoyCon.bleAddress, static_cast<int>(gyroSource));
+        if (!rightJoyCon.inputChar) {
+            APP_LOG_ERROR("Right Joy-Con has no input-report characteristic (address: %llu); cannot subscribe",
+                          rightJoyCon.bleAddress);
+            return false;
+        }
+        if (!rightJoyCon.writeChar) {
+            APP_LOG_WARNING("Right Joy-Con has no write-command characteristic (address: %llu); "
+                            "LED/vibration/command features will be unavailable",
+                            rightJoyCon.bleAddress);
+        }
+
         pendingDualRight = rightJoyCon;
         pendingDualGyro = gyroSource;
         if (rightJoyCon.writeChar) {
@@ -728,6 +781,19 @@ public:
     }
 
     bool AddDualJoyConSecondStep(ConnectedJoyCon leftJoyCon) {
+        APP_LOG_INFO("Dual Joy-Con second step: left Joy-Con paired (address: %llu)", leftJoyCon.bleAddress);
+        if (!leftJoyCon.inputChar) {
+            APP_LOG_ERROR("Left Joy-Con has no input-report characteristic (address: %llu); cannot subscribe",
+                          leftJoyCon.bleAddress);
+            ClearPendingDual();
+            return false;
+        }
+        if (!pendingDualRight.inputChar) {
+            APP_LOG_ERROR("Pending right Joy-Con has no input-report characteristic (address: %llu); cannot subscribe",
+                          pendingDualRight.bleAddress);
+            ClearPendingDual();
+            return false;
+        }
         if (leftJoyCon.writeChar) {
             SendCustomCommands(leftJoyCon.writeChar);
             std::this_thread::sleep_for(std::chrono::milliseconds(200));
@@ -739,7 +805,10 @@ public:
         bool xboxMode = ConfigManager::Instance().GetDeviceSettings(pendingDualRight.bleAddress).useXboxEmulation;
 
         PVIGEM_TARGET target = xboxMode ? vigem.AllocX360() : vigem.AllocDS4();
-        if (!target || !vigem.AddTarget(target)) return false;
+        if (!target || !vigem.AddTarget(target)) {
+            APP_LOG_ERROR("Failed to allocate/add ViGEm target for dual Joy-Con");
+            return false;
+        }
 
         auto dp = std::make_unique<DualJoyConPlayer>();
         dp->leftJoyCon = leftJoyCon;
@@ -772,8 +841,28 @@ public:
             ptr->bufferCV.notify_one();
         });
 
-        dp->leftJoyCon.inputChar.WriteClientCharacteristicConfigurationDescriptorAsync(
-            GattClientCharacteristicConfigurationDescriptorValue::Notify).get();
+        GattCommunicationStatus leftSubscribeStatus = GattCommunicationStatus::Success;
+        try {
+            leftSubscribeStatus = dp->leftJoyCon.inputChar.WriteClientCharacteristicConfigurationDescriptorAsync(
+                GattClientCharacteristicConfigurationDescriptorValue::Notify).get();
+        } catch (const winrt::hresult_error& e) {
+            APP_LOG_ERROR("Dual Joy-Con left notification subscription threw (address: %llu): %s",
+                          leftJoyCon.bleAddress, BluetoothLog::DescribeHResultError(e).c_str());
+            leftSubscribeStatus = GattCommunicationStatus::Unreachable;
+        } catch (...) {
+            APP_LOG_ERROR("Dual Joy-Con left notification subscription threw an unknown exception (address: %llu)",
+                          leftJoyCon.bleAddress);
+            leftSubscribeStatus = GattCommunicationStatus::Unreachable;
+        }
+
+        if (leftSubscribeStatus == GattCommunicationStatus::Success) {
+            APP_LOG_INFO("Dual Joy-Con left input notification subscription succeeded (address: %llu)",
+                         leftJoyCon.bleAddress);
+        } else {
+            APP_LOG_ERROR("Dual Joy-Con left input notification subscription failed (address: %llu): %s",
+                          leftJoyCon.bleAddress,
+                          BluetoothLog::DescribeGattStatus(leftSubscribeStatus).c_str());
+        }
 
         dp->rightJoyCon.inputChar.ValueChanged([ptr = dp.get()](GattCharacteristic const&, GattValueChangedEventArgs const& args) {
             auto reader = DataReader::FromBuffer(args.CharacteristicValue());
@@ -783,8 +872,28 @@ public:
             ptr->bufferCV.notify_one();
         });
 
-        dp->rightJoyCon.inputChar.WriteClientCharacteristicConfigurationDescriptorAsync(
-            GattClientCharacteristicConfigurationDescriptorValue::Notify).get();
+        GattCommunicationStatus rightSubscribeStatus = GattCommunicationStatus::Success;
+        try {
+            rightSubscribeStatus = dp->rightJoyCon.inputChar.WriteClientCharacteristicConfigurationDescriptorAsync(
+                GattClientCharacteristicConfigurationDescriptorValue::Notify).get();
+        } catch (const winrt::hresult_error& e) {
+            APP_LOG_ERROR("Dual Joy-Con right notification subscription threw (address: %llu): %s",
+                          pendingDualRight.bleAddress, BluetoothLog::DescribeHResultError(e).c_str());
+            rightSubscribeStatus = GattCommunicationStatus::Unreachable;
+        } catch (...) {
+            APP_LOG_ERROR("Dual Joy-Con right notification subscription threw an unknown exception (address: %llu)",
+                          pendingDualRight.bleAddress);
+            rightSubscribeStatus = GattCommunicationStatus::Unreachable;
+        }
+
+        if (rightSubscribeStatus == GattCommunicationStatus::Success) {
+            APP_LOG_INFO("Dual Joy-Con right input notification subscription succeeded (address: %llu)",
+                         pendingDualRight.bleAddress);
+        } else {
+            APP_LOG_ERROR("Dual Joy-Con right input notification subscription failed (address: %llu): %s",
+                          pendingDualRight.bleAddress,
+                          BluetoothLog::DescribeGattStatus(rightSubscribeStatus).c_str());
+        }
 
         dp->updateThread = std::thread([ptr = dp.get()]() {
             // Elevate merge thread priority for responsive dual JoyCon input
@@ -816,16 +925,33 @@ public:
 
         dualPlayers.push_back(std::move(dp));
         ClearPendingDual();  // Release extra BLE references so disconnect works for right Joy-Con
+        APP_LOG_INFO("Dual Joy-Con add completed (total players: %d)", GetPlayerCount());
         return true;
     }
 
     // Add Pro Controller or NSO GC
     bool AddProOrGC(ConnectedJoyCon controller, ControllerType type) {
+        APP_LOG_INFO("Adding Pro/NSO-GC controller (address: %llu, type: %d)",
+                     controller.bleAddress, static_cast<int>(type));
+        if (!controller.inputChar) {
+            APP_LOG_ERROR("Pro/NSO-GC controller has no input-report characteristic (address: %llu); cannot subscribe",
+                          controller.bleAddress);
+            return false;
+        }
+        if (!controller.writeChar) {
+            APP_LOG_WARNING("Pro/NSO-GC controller has no write-command characteristic (address: %llu); "
+                            "LED/vibration/command features will be unavailable",
+                            controller.bleAddress);
+        }
+
         auto& vigem = ViGEmManager::Instance();
         bool xboxMode = ConfigManager::Instance().GetDeviceSettings(controller.bleAddress).useXboxEmulation;
 
         PVIGEM_TARGET target = xboxMode ? vigem.AllocX360() : vigem.AllocDS4();
-        if (!target || !vigem.AddTarget(target)) return false;
+        if (!target || !vigem.AddTarget(target)) {
+            APP_LOG_ERROR("Failed to allocate/add ViGEm target for Pro/NSO-GC controller");
+            return false;
+        }
 
         if (type == ControllerType::ProController) {
             ConfigManager::Instance().EnsureDefaults();
@@ -893,8 +1019,28 @@ public:
             }
         }
 
-        controller.inputChar.WriteClientCharacteristicConfigurationDescriptorAsync(
-            GattClientCharacteristicConfigurationDescriptorValue::Notify).get();
+        GattCommunicationStatus proStatus = GattCommunicationStatus::Success;
+        try {
+            proStatus = controller.inputChar.WriteClientCharacteristicConfigurationDescriptorAsync(
+                GattClientCharacteristicConfigurationDescriptorValue::Notify).get();
+        } catch (const winrt::hresult_error& e) {
+            APP_LOG_ERROR("Pro/NSO-GC notification subscription threw (address: %llu): %s",
+                          controller.bleAddress, BluetoothLog::DescribeHResultError(e).c_str());
+            proStatus = GattCommunicationStatus::Unreachable;
+        } catch (...) {
+            APP_LOG_ERROR("Pro/NSO-GC notification subscription threw an unknown exception (address: %llu)",
+                          controller.bleAddress);
+            proStatus = GattCommunicationStatus::Unreachable;
+        }
+
+        if (proStatus == GattCommunicationStatus::Success) {
+            APP_LOG_INFO("Pro/NSO-GC input notification subscription succeeded (address: %llu)",
+                         controller.bleAddress);
+        } else {
+            APP_LOG_ERROR("Pro/NSO-GC input notification subscription failed (address: %llu): %s",
+                          controller.bleAddress,
+                          BluetoothLog::DescribeGattStatus(proStatus).c_str());
+        }
 
         if (controller.writeChar) {
             SendCustomCommands(controller.writeChar);
@@ -918,11 +1064,13 @@ public:
                 vigem.GetClient(), target, DS4VibrationCallback, pp.vibCtx.get());
         }
 
+        APP_LOG_INFO("Pro/NSO-GC add completed (total players: %d)", GetPlayerCount());
         return true;
     }
 
     // Remove player by index across all types
     void RemovePlayerByGlobalIndex(int globalIdx) {
+        APP_LOG_INFO("Removing player at global index %d", globalIdx);
         int idx = globalIdx;
         if (idx < (int)singlePlayers.size()) {
             if (singlePlayers[idx]->isXboxMode)
@@ -958,6 +1106,7 @@ public:
     }
 
     void Shutdown() {
+        APP_LOG_INFO("PlayerManager shutdown: disconnecting %d player(s)", GetPlayerCount());
         // Stop mouse interpolation thread
         mouseInterpolRunning.store(false);
         if (mouseInterpolThread.joinable()) mouseInterpolThread.join();

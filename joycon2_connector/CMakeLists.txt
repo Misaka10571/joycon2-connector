@@ -39,6 +39,7 @@ include_directories(
 set(APP_SOURCES
   src/App.cpp
   src/JoyConDecoder.cpp
+  src/Logger.cpp
 )
 
 # Resource file (DPI manifest)

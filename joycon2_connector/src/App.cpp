@@ -10,6 +10,7 @@
 #include <tchar.h>
 #include <string>
 #include <algorithm>
+#include <exception>
 
 #include <winrt/Windows.Foundation.h>
 
@@ -24,6 +25,7 @@
 #include "PlayerManager.h"
 #include "i18n.h"
 #include "UpdateChecker.h"
+#include "Logger.h"
 #include "app_icon.h"
 #include "version.h"
 
@@ -672,6 +674,10 @@ void LoadFonts(ImGuiIO& io, float dpiScale) {
 
 // ---------- Main entry ----------
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
+    Logger::Init();
+    std::set_terminate(Logger::OnTerminate);
+    APP_LOG_INFO("JoyCon2 Connector v%s starting (PID: %lu)", APP_VERSION, GetCurrentProcessId());
+
     winrt::init_apartment();
 
     // Enable Per-Monitor DPI Awareness V2
@@ -687,7 +693,11 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
     wc.hIcon = LoadIcon(hInstance, MAKEINTRESOURCE(101));
     wc.hIconSm = LoadIcon(hInstance, MAKEINTRESOURCE(101));
     wc.lpszClassName = L"JoyCon2ConnectorClass";
-    RegisterClassExW(&wc);
+    if (!RegisterClassExW(&wc)) {
+        APP_LOG_ERROR("RegisterClassExW failed (error %lu)", GetLastError());
+        Logger::Shutdown();
+        return 1;
+    }
 
     // Get initial DPI for sizing
     // Use the primary monitor DPI for initial window placement
@@ -707,6 +717,13 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
         CW_USEDEFAULT, CW_USEDEFAULT, initW, initH,
         NULL, NULL, hInstance, NULL);
     g_hwnd = hwnd;
+    if (!hwnd) {
+        APP_LOG_ERROR("CreateWindowExW failed (error %lu)", GetLastError());
+        UnregisterClassW(wc.lpszClassName, hInstance);
+        Logger::Shutdown();
+        return 1;
+    }
+    APP_LOG_INFO("Main window created (%dx%d, initial DPI scale %.2f)", initW, initH, g_dpiScale);
 
     // Enable DWM shadow for frameless window
     MARGINS margins = { 1, 1, 1, 1 };
@@ -717,10 +734,14 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
     UITheme::DpiScale = g_dpiScale;
 
     if (!CreateDeviceD3D(hwnd)) {
+        APP_LOG_ERROR("Direct3D 11 device/swap chain creation failed");
         CleanupDeviceD3D();
+        DestroyWindow(hwnd);
         UnregisterClassW(wc.lpszClassName, hInstance);
+        Logger::Shutdown();
         return 1;
     }
+    APP_LOG_INFO("Direct3D 11 device created");
 
     ShowWindow(hwnd, SW_SHOWDEFAULT);
     UpdateWindow(hwnd);
@@ -750,7 +771,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
 
     // Init managers
     ViGEmManager::Instance().Initialize();
-    ConfigManager::Instance().Load();
+    bool configLoaded = ConfigManager::Instance().Load();
+    APP_LOG_INFO("Config load: %s", configLoaded ? "found" : "not found (defaults will be used)");
     ConfigManager::Instance().EnsureDefaults();
 
     // Initialize language: load from embedded data, then select from config or detect
@@ -777,9 +799,11 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
             ConfigManager::Instance().Save();
         }
     }
+    APP_LOG_INFO("UI language selected: %s", I18nManager::Instance().GetCurrentLocale().c_str());
 
     // Auto check for updates on startup (non-blocking background thread)
     if (ConfigManager::Instance().config.autoCheckUpdate) {
+        APP_LOG_INFO("Auto update check enabled; starting silent check");
         UpdateChecker::Instance().CheckForUpdateSilent();
     }
 
@@ -787,6 +811,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
     float clearColor[4] = { 0.96f, 0.94f, 0.92f, 1.0f };
 
     // Main loop
+    APP_LOG_INFO("Entering main loop");
     bool running = true;
     MSG msg;
     while (running) {
@@ -873,6 +898,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
     }
 
     // Cleanup
+    APP_LOG_INFO("Normal shutdown initiated");
     RemoveTrayIcon();
     PlayerManager::Instance().Shutdown();
     ViGEmManager::Instance().Shutdown();
@@ -892,6 +918,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
     DestroyWindow(hwnd);
     UnregisterClassW(wc.lpszClassName, hInstance);
 
+    APP_LOG_INFO("Shutdown complete");
+    Logger::Shutdown();
     return 0;
 }
 
@@ -960,6 +988,7 @@ LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         return 0;
 
     case WM_DESTROY:
+        APP_LOG_INFO("WM_DESTROY received; posting quit message");
         RemoveTrayIcon();
         PostQuitMessage(0);
         return 0;
@@ -967,11 +996,13 @@ LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     case WM_CLOSE:
         if (!g_forceQuit && ConfigManager::Instance().config.minimizeToTray) {
             // Minimize to tray instead of closing
+            APP_LOG_INFO("WM_CLOSE: minimizing to system tray");
             CreateTrayIcon(hWnd);
             ShowWindow(hWnd, SW_HIDE);
             return 0;
         }
         // Normal close
+        APP_LOG_INFO("WM_CLOSE: closing window");
         RemoveTrayIcon();
         DestroyWindow(hWnd);
         return 0;
@@ -1056,6 +1087,7 @@ LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
     case WM_DPICHANGED: {
         float newDpi = HIWORD(wParam) / 96.0f;
+        APP_LOG_DEBUG("DPI changed to %.2f; rebuilding fonts", newDpi);
         g_pendingDpiScale = newDpi;
         g_fontRebuildNeeded = true;
         RECT* suggested = (RECT*)lParam;

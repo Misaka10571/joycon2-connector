@@ -4,6 +4,7 @@
 #include <ViGEm/Common.h>
 #include <iostream>
 #include <atomic>
+#include "Logger.h"
 
 class ViGEmManager {
 public:
@@ -15,26 +16,31 @@ public:
     bool Initialize() {
         if (client != nullptr) return true;
 
+        APP_LOG_INFO("Initializing ViGEm client");
         client = vigem_alloc();
         if (!client) {
+            APP_LOG_ERROR("ViGEm client allocation failed (driver may not be installed)");
             connected = false;
             return false;
         }
 
         auto ret = vigem_connect(client);
         if (!VIGEM_SUCCESS(ret)) {
+            APP_LOG_ERROR("ViGEm connect failed (error code: 0x%08X)", static_cast<unsigned int>(ret));
             vigem_free(client);
             client = nullptr;
             connected = false;
             return false;
         }
 
+        APP_LOG_INFO("ViGEm client connected");
         connected = true;
         return true;
     }
 
     void Shutdown() {
         if (client) {
+            APP_LOG_INFO("Disconnecting ViGEm client");
             vigem_disconnect(client);
             vigem_free(client);
             client = nullptr;
