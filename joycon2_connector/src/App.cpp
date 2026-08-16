@@ -72,6 +72,31 @@ bool CreateDeviceD3D(HWND hWnd);
 void CleanupDeviceD3D();
 void CreateRenderTarget();
 
+static bool TryIsWindows11OrGreater(bool& result) {
+    using RtlGetVersionFn = LONG(WINAPI*)(OSVERSIONINFOW*);
+    HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
+    auto rtlGetVersion = ntdll
+        ? reinterpret_cast<RtlGetVersionFn>(GetProcAddress(ntdll, "RtlGetVersion"))
+        : nullptr;
+    if (!rtlGetVersion) {
+        APP_LOG_WARNING("Could not resolve RtlGetVersion");
+        return false;
+    }
+
+    OSVERSIONINFOW version = {};
+    version.dwOSVersionInfoSize = sizeof(version);
+    if (rtlGetVersion(&version) != 0) {
+        APP_LOG_WARNING("RtlGetVersion failed");
+        return false;
+    }
+
+    APP_LOG_INFO("Detected Windows version %lu.%lu (build %lu)",
+        version.dwMajorVersion, version.dwMinorVersion, version.dwBuildNumber);
+    result = version.dwMajorVersion > 10 ||
+        (version.dwMajorVersion == 10 && version.dwBuildNumber >= 22000);
+    return true;
+}
+
 // ---------- UTF-8 to Wide string helper ----------
 static std::wstring Utf8ToWide(const char* utf8) {
     if (!utf8 || !utf8[0]) return L"";
@@ -801,6 +826,15 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
     }
     APP_LOG_INFO("UI language selected: %s", I18nManager::Instance().GetCurrentLocale().c_str());
 
+    bool showWindowsVersionWarning = false;
+    bool isWindows11OrGreater = false;
+    if (TryIsWindows11OrGreater(isWindows11OrGreater) &&
+        !isWindows11OrGreater &&
+        !ConfigManager::Instance().config.nonWindows11WarningShown)
+    {
+        showWindowsVersionWarning = true;
+    }
+
     // Auto check for updates on startup (non-blocking background thread)
     if (ConfigManager::Instance().config.autoCheckUpdate) {
         APP_LOG_INFO("Auto update check enabled; starting silent check");
@@ -885,6 +919,13 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
         case 4: RenderSettings(); break;
         }
         ImGui::EndChild();
+
+        if (RenderWindowsVersionWarning(showWindowsVersionWarning) &&
+            !ConfigManager::Instance().config.nonWindows11WarningShown)
+        {
+            ConfigManager::Instance().config.nonWindows11WarningShown = true;
+            ConfigManager::Instance().Save();
+        }
 
         ImGui::End();
 
