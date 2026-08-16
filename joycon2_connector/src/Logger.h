@@ -1,6 +1,7 @@
 #pragma once
 // Logger - Optional file logging (enabled only with the --debug command line flag).
-// Log files are written next to the executable as joycon2_connector_debug.log.
+// Logs are written under <executable directory>/logs. The current session uses
+// latest.log, and the previous session is archived under its start time.
 // Also installs an unhandled-exception filter so crashes are recorded in the same log.
 
 #include <Windows.h>

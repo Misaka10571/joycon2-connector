@@ -15,7 +15,9 @@ std::atomic<bool> g_initialized{ false };
 std::atomic<bool> g_debugEnabled{ false };
 HANDLE g_logFile = INVALID_HANDLE_VALUE;
 CRITICAL_SECTION g_logLock{};
-constexpr wchar_t LOG_FILE_NAME[] = L"joycon2_connector_debug.log";
+constexpr wchar_t LOG_DIRECTORY_NAME[] = L"logs";
+constexpr wchar_t LATEST_LOG_FILE_NAME[] = L"latest.log";
+constexpr wchar_t LEGACY_LOG_FILE_NAME[] = L"joycon2_connector_debug.log";
 
 const char* LevelName(LogLevel level) {
     switch (level) {
@@ -52,6 +54,75 @@ std::wstring GetExecutableDirectory() {
         return L".";
     }
     return path.substr(0, slash);
+}
+
+std::wstring JoinPath(const std::wstring& directory, const wchar_t* name) {
+    if (!directory.empty() && directory.back() != L'\\' && directory.back() != L'/') {
+        return directory + L"\\" + name;
+    }
+    return directory + name;
+}
+
+bool EnsureDirectory(const std::wstring& path) {
+    if (CreateDirectoryW(path.c_str(), nullptr)) {
+        return true;
+    }
+    if (GetLastError() != ERROR_ALREADY_EXISTS) {
+        return false;
+    }
+
+    DWORD attributes = GetFileAttributesW(path.c_str());
+    return attributes != INVALID_FILE_ATTRIBUTES &&
+           (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+}
+
+std::wstring BuildArchivePath(const std::wstring& logDirectory,
+                              const SYSTEMTIME& startTime,
+                              unsigned int suffix) {
+    wchar_t fileName[80];
+    if (suffix == 0) {
+        swprintf_s(fileName, L"%04u-%02u-%02u_%02u-%02u-%02u-%03u.log",
+                   startTime.wYear, startTime.wMonth, startTime.wDay,
+                   startTime.wHour, startTime.wMinute, startTime.wSecond,
+                   startTime.wMilliseconds);
+    } else {
+        swprintf_s(fileName, L"%04u-%02u-%02u_%02u-%02u-%02u-%03u_%u.log",
+                   startTime.wYear, startTime.wMonth, startTime.wDay,
+                   startTime.wHour, startTime.wMinute, startTime.wSecond,
+                   startTime.wMilliseconds, suffix);
+    }
+    return JoinPath(logDirectory, fileName);
+}
+
+bool ArchiveLog(const std::wstring& sourcePath, const std::wstring& logDirectory) {
+    WIN32_FILE_ATTRIBUTE_DATA attributes{};
+    if (!GetFileAttributesExW(sourcePath.c_str(), GetFileExInfoStandard, &attributes)) {
+        DWORD error = GetLastError();
+        return error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND;
+    }
+    if ((attributes.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0) {
+        return false;
+    }
+
+    FILETIME localCreationTime{};
+    SYSTEMTIME startTime{};
+    if (!FileTimeToLocalFileTime(&attributes.ftCreationTime, &localCreationTime) ||
+        !FileTimeToSystemTime(&localCreationTime, &startTime)) {
+        GetLocalTime(&startTime);
+    }
+
+    for (unsigned int suffix = 0; suffix < 10000; ++suffix) {
+        std::wstring archivePath = BuildArchivePath(logDirectory, startTime, suffix);
+        if (MoveFileW(sourcePath.c_str(), archivePath.c_str())) {
+            return true;
+        }
+
+        DWORD error = GetLastError();
+        if (error != ERROR_ALREADY_EXISTS && error != ERROR_FILE_EXISTS) {
+            return error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND;
+        }
+    }
+    return false;
 }
 
 bool HasDebugFlag() {
@@ -258,17 +329,25 @@ void Logger::Init() {
         return;
     }
 
-    std::wstring logPath = GetExecutableDirectory();
-    if (logPath != L".") {
-        logPath += L"\\";
+    std::wstring executableDirectory = GetExecutableDirectory();
+    std::wstring logDirectory = JoinPath(executableDirectory, LOG_DIRECTORY_NAME);
+    if (!EnsureDirectory(logDirectory)) {
+        return;
     }
-    logPath += LOG_FILE_NAME;
+
+    std::wstring logPath = JoinPath(logDirectory, LATEST_LOG_FILE_NAME);
+    if (!ArchiveLog(logPath, logDirectory)) {
+        return;
+    }
+
+    // Move logs created by versions before the logs directory was introduced.
+    ArchiveLog(JoinPath(executableDirectory, LEGACY_LOG_FILE_NAME), logDirectory);
 
     HANDLE file = CreateFileW(logPath.c_str(),
                               FILE_APPEND_DATA,
                               FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                               nullptr,
-                              OPEN_ALWAYS,
+                              CREATE_NEW,
                               FILE_ATTRIBUTE_NORMAL,
                               nullptr);
     if (file == INVALID_HANDLE_VALUE) {

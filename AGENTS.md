@@ -35,7 +35,7 @@ cmake --build joycon2_connector/build_check --config Release
 - Language JSON must remain a flat object of string values and include `_locale` and `_display_name`. Adding a language file requires rerunning CMake configure because `file(GLOB)` runs at configure time.
 - `joycon2_config.json` is relative to the process working directory, not the executable directory. Device settings are keyed by BLE address; `useXboxEmulation` selects DS4/X360 and `useRawVibration` selects raw `0x5N` packets versus `0x0A` firmware samples.
 - Keep raw `0x5N` vibration as the default; `0x0A` samples can produce audible beeping on Pro 2 controllers.
-- Case-insensitive `--debug` enables append-only, per-line-flushed logging and crash records at `<exe-dir>/joycon2_connector_debug.log`; without it no log file is created.
+- Case-insensitive `--debug` enables per-line-flushed logging and crash records at `<exe-dir>/logs/latest.log`; each previous session is archived under its start time, and without the flag no log file is created.
 
 ## Concurrency and lifecycle
 
