@@ -64,6 +64,16 @@ Before running the app, make sure these are installed:
 3. Follow the on-screen steps — you'll be prompted to specify Left/Right for single Joy-Cons, or pair them one at a time for dual mode.
 4. Once connected, your controller appears on the **Dashboard** as a virtual DS4 gamepad, ready to use in any supported PC or emulator game.
 
+### Debug Logging
+
+To help diagnose crashes or other issues, launch the app with the `--debug` flag:
+
+```sh
+joycon2_connector.exe --debug
+```
+
+A `joycon2_connector_debug.log` file will be created next to the executable. The log includes detailed Bluetooth scan/connection errors (Windows Bluetooth error codes, GATT status, ATT protocol errors, and HRESULT messages). Please attach this log when reporting crashes or connection issues.
+
 ### Mouse Mode (Right Joy-Con 2 only)
 
 The right Joy-Con 2's optical sensor can act as a PC mouse. Press the **CHAT button** to cycle through three mouse modes (high / medium / low sensitivity) or turn it off. Sensitivity and scroll speed can be tuned in the **Mouse Settings** page.

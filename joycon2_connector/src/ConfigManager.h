@@ -4,6 +4,7 @@
 #include <fstream>
 #include <sstream>
 #include <map>
+#include "Logger.h"
 
 // GL/GR Button Mapping Configuration
 enum class ButtonMapping {
@@ -306,9 +307,13 @@ public:
 
     bool Load() {
         std::ifstream file(configFile);
-        if (!file.is_open()) return false;
+        if (!file.is_open()) {
+            APP_LOG_DEBUG("Config file %s not found (first launch?)", configFile.c_str());
+            return false;
+        }
         std::stringstream ss;
         ss << file.rdbuf();
+        APP_LOG_DEBUG("Config loaded from %s", configFile.c_str());
         return JSONToConfig(ss.str(), config);
     }
 
@@ -316,6 +321,10 @@ public:
         std::ofstream file(configFile);
         if (file.is_open()) {
             file << ConfigToJSON(config);
+            file.close();
+            APP_LOG_DEBUG("Config saved to %s", configFile.c_str());
+        } else {
+            APP_LOG_WARNING("Could not open %s for writing", configFile.c_str());
         }
     }
 

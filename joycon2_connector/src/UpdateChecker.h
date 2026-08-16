@@ -16,6 +16,7 @@
 #include <winrt/Windows.Storage.Streams.h>
 
 #include "version.h"
+#include "Logger.h"
 
 enum class UpdateState {
     Idle,
@@ -39,6 +40,7 @@ public:
 
         state_.store(UpdateState::Checking);
         manualCheck_ = true;
+        APP_LOG_INFO("Manual update check started");
 
         std::thread([this]() {
             try {
@@ -57,6 +59,7 @@ public:
                 if (status != winrt::Windows::Foundation::AsyncStatus::Completed) {
                     // Timed out or error — cancel the operation
                     asyncOp.Cancel();
+                    APP_LOG_WARNING("Update check request timed out");
                     state_.store(UpdateState::Error);
                     return;
                 }
@@ -67,6 +70,7 @@ public:
                 // Extract "tag_name" from JSON response
                 std::string tagName = ExtractTagName(json);
                 if (tagName.empty()) {
+                    APP_LOG_WARNING("Update check failed: could not parse tag_name from response");
                     state_.store(UpdateState::Error);
                     return;
                 }
@@ -83,14 +87,17 @@ public:
 
                 // Compare versions
                 if (IsNewerVersion(tagName)) {
+                    APP_LOG_INFO("Update available: %s (current: %s)", tagName.c_str(), APP_VERSION);
                     state_.store(UpdateState::UpdateAvailable);
                     showPopup_ = true;
                 } else {
+                    APP_LOG_INFO("Application is up to date (remote: %s, current: %s)", tagName.c_str(), APP_VERSION);
                     state_.store(UpdateState::UpToDate);
                 }
 
             } catch (...) {
                 // Any exception (network error, WinRT error, etc.)
+                APP_LOG_WARNING("Manual update check failed with an exception");
                 state_.store(UpdateState::Error);
             }
         }).detach();
@@ -103,6 +110,7 @@ public:
         if (state_.load() == expected) return;
 
         state_.store(UpdateState::Checking);
+        APP_LOG_DEBUG("Silent update check started");
 
         std::thread([this]() {
             try {
@@ -116,6 +124,7 @@ public:
                 auto status = asyncOp.wait_for(std::chrono::seconds(10));
                 if (status != winrt::Windows::Foundation::AsyncStatus::Completed) {
                     asyncOp.Cancel();
+                    APP_LOG_DEBUG("Silent update check timed out");
                     state_.store(UpdateState::Idle);  // Silent fail
                     return;
                 }
@@ -125,6 +134,7 @@ public:
 
                 std::string tagName = ExtractTagName(json);
                 if (tagName.empty()) {
+                    APP_LOG_DEBUG("Silent update check could not parse tag_name");
                     state_.store(UpdateState::Idle);
                     return;
                 }
@@ -139,13 +149,16 @@ public:
                 }
 
                 if (IsNewerVersion(tagName)) {
+                    APP_LOG_INFO("Update available (silent check): %s (current: %s)", tagName.c_str(), APP_VERSION);
                     state_.store(UpdateState::UpdateAvailable);
                     showPopup_ = true;
                 } else {
+                    APP_LOG_DEBUG("Application is up to date (silent check)");
                     state_.store(UpdateState::Idle);  // Silent — don't show "up to date"
                 }
 
             } catch (...) {
+                APP_LOG_DEBUG("Silent update check failed with an exception");
                 state_.store(UpdateState::Idle);  // Silent fail on auto-check
             }
         }).detach();

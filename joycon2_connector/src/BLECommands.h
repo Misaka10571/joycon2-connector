@@ -3,6 +3,7 @@
 #include <winrt/Windows.Foundation.h>
 #include <winrt/Windows.Storage.Streams.h>
 #include <winrt/Windows.Devices.Bluetooth.GenericAttributeProfile.h>
+#include "BluetoothLog.h"
 #include <vector>
 #include <thread>
 #include <chrono>
@@ -26,7 +27,24 @@ inline void SendGenericCommand(GattCharacteristic const& characteristic, uint8_t
     for (uint8_t b : data) writer.WriteByte(b);
 
     IBuffer buffer = writer.DetachBuffer();
-    characteristic.WriteValueAsync(buffer, GattWriteOption::WriteWithoutResponse).get();
+    APP_LOG_DEBUG("Sending BLE command cmd=0x%02X subCmd=0x%02X payload=%zu byte(s)",
+                  cmdId, subCmdId, data.size());
+
+    try {
+        auto status = characteristic.WriteValueAsync(buffer, GattWriteOption::WriteWithoutResponse).get();
+        if (status != GattCommunicationStatus::Success) {
+            APP_LOG_WARNING("BLE command cmd=0x%02X subCmd=0x%02X failed: %s",
+                            cmdId, subCmdId,
+                            BluetoothLog::DescribeGattStatus(status).c_str());
+        }
+    } catch (const winrt::hresult_error& e) {
+        APP_LOG_ERROR("BLE command cmd=0x%02X subCmd=0x%02X threw: %s",
+                      cmdId, subCmdId, BluetoothLog::DescribeHResultError(e).c_str());
+    } catch (...) {
+        APP_LOG_ERROR("BLE command cmd=0x%02X subCmd=0x%02X threw an unknown exception",
+                      cmdId, subCmdId);
+    }
+
     std::this_thread::sleep_for(std::chrono::milliseconds(35));
 }
 
@@ -36,11 +54,27 @@ inline void SendCustomCommands(GattCharacteristic const& characteristic) {
         { 0x0c, 0x91, 0x01, 0x04, 0x00, 0x04, 0x00, 0x00, 0xFF, 0x00, 0x00, 0x00 }
     };
 
-    for (const auto& cmd : commands) {
+    for (size_t index = 0; index < commands.size(); ++index) {
+        const auto& cmd = commands[index];
         auto writer = DataWriter();
         writer.WriteBytes(cmd);
         IBuffer buffer = writer.DetachBuffer();
-        characteristic.WriteValueAsync(buffer, GattWriteOption::WriteWithoutResponse).get();
+        APP_LOG_DEBUG("Sending custom init command %zu/%zu (%zu byte(s))",
+                      index + 1, commands.size(), cmd.size());
+
+        try {
+            auto status = characteristic.WriteValueAsync(buffer, GattWriteOption::WriteWithoutResponse).get();
+            if (status != GattCommunicationStatus::Success) {
+                APP_LOG_WARNING("Custom init command %zu failed: %s",
+                                index + 1, BluetoothLog::DescribeGattStatus(status).c_str());
+            }
+        } catch (const winrt::hresult_error& e) {
+            APP_LOG_ERROR("Custom init command %zu threw: %s",
+                          index + 1, BluetoothLog::DescribeHResultError(e).c_str());
+        } catch (...) {
+            APP_LOG_ERROR("Custom init command %zu threw an unknown exception", index + 1);
+        }
+
         std::this_thread::sleep_for(std::chrono::milliseconds(300));
     }
 }
@@ -92,7 +126,18 @@ inline void SendRawVibration(GattCharacteristic const& characteristic,
     writer.WriteByte(0x00);                                      // [15] padding
 
     IBuffer buffer = writer.DetachBuffer();
-    characteristic.WriteValueAsync(buffer, GattWriteOption::WriteWithoutResponse).get();
+    try {
+        auto status = characteristic.WriteValueAsync(buffer, GattWriteOption::WriteWithoutResponse).get();
+        if (status != GattCommunicationStatus::Success) {
+            APP_LOG_DEBUG("Raw vibration write failed: %s",
+                          BluetoothLog::DescribeGattStatus(status).c_str());
+        }
+    } catch (const winrt::hresult_error& e) {
+        APP_LOG_DEBUG("Raw vibration write threw: %s",
+                      BluetoothLog::DescribeHResultError(e).c_str());
+    } catch (...) {
+        APP_LOG_DEBUG("Raw vibration write threw an unknown exception");
+    }
     // No sleep — raw vibration needs low latency
 }
 

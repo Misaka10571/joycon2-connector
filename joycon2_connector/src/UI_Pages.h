@@ -8,6 +8,7 @@
 #include "ViGEmManager.h"
 #include "UI_Theme.h"
 #include "UpdateChecker.h"
+#include "Logger.h"
 #include "version.h"
 #include <string>
 #include <cmath>
@@ -872,6 +873,7 @@ inline void RenderAddDevice(int& activePage) {
                 g_wizard.statusMessage.clear();
 
                 DeviceManager::Instance().StartScan([](ConnectedJoyCon cj, ScanState state) {
+                    APP_LOG_DEBUG("Add Device wizard scan callback: state=%d", static_cast<int>(state));
                     if (state == ScanState::Found) {
                         auto& wiz = g_wizard;
                         bool ok = false;
@@ -896,10 +898,13 @@ inline void RenderAddDevice(int& activePage) {
 
                         if (ok) wiz.statusMessage = "OK";
                         else wiz.statusMessage = "FAIL";
+                        APP_LOG_INFO("Add Device wizard result: %s", ok ? "OK" : "FAIL");
                     } else if (state == ScanState::Timeout) {
                         g_wizard.statusMessage = "TIMEOUT";
+                        APP_LOG_WARNING("Add Device wizard: scan timeout");
                     } else if (state == ScanState::Error) {
                         g_wizard.statusMessage = "ERROR";
+                        APP_LOG_ERROR("Add Device wizard: scan error");
                     }
                 });
             }
@@ -966,11 +971,14 @@ inline void RenderAddDevice(int& activePage) {
                 g_wizard.statusMessage.clear();
 
                 DeviceManager::Instance().StartScan([&activePage](ConnectedJoyCon cj, ScanState state) {
+                    APP_LOG_DEBUG("Add Device left Joy-Con scan callback: state=%d", static_cast<int>(state));
                     if (state == ScanState::Found) {
                         bool ok = PlayerManager::Instance().AddDualJoyConSecondStep(cj);
                         g_wizard.statusMessage = ok ? "OK" : "FAIL";
+                        APP_LOG_INFO("Left Joy-Con pairing result: %s", ok ? "OK" : "FAIL");
                     } else if (state == ScanState::Timeout) {
                         g_wizard.statusMessage = "TIMEOUT";
+                        APP_LOG_WARNING("Left Joy-Con scan timeout");
                     }
                 });
             }
