@@ -95,6 +95,8 @@
     "settings_title": "设置",
     "settings_language": "界面语言",
     "settings_language_hint": "选择界面显示语言，切换后立即生效",
+    "settings_gyro_sensitivity": "陀螺仪灵敏度",
+    "settings_gyro_sensitivity_hint": "体感过强或过弱时调整此倍率（仅 DS4 模式，1.00 = 原始值）",
     "settings_about": "关于",
     "settings_about_desc": "将 Switch 2 Joy-Con 连接至 PC，通过 ViGEmBus 模拟为 DS4 手柄",
     "settings_about_author": "Maintained by Misaka 10571",

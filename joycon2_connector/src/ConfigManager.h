@@ -56,6 +56,7 @@ struct AppConfig {
     VibrationConfig vibrationConfig;
     std::string language;  // "en", "zh", or "" (auto-detect)
     std::map<uint64_t, DeviceSettings> deviceSettings;  // per-device settings, keyed by BLE address
+    float gyroSensitivity = 1.0f;  // DS4 gyro multiplier (1.0 = raw JoyCon2 values)
     bool minimizeToTray = false;  // Minimize to system tray on close instead of exiting
     bool autoCheckUpdate = false;  // Auto check for updates on startup (default off)
     bool suppressXboxWarning = false;  // Don't show Xbox emulation gyro warning
@@ -135,6 +136,7 @@ inline std::string ConfigToJSON(const AppConfig& config) {
     oss << "    \"enabled\": " << (config.vibrationConfig.enabled ? "true" : "false") << ",\n";
     oss << "    \"intensity\": " << config.vibrationConfig.intensity << "\n";
     oss << "  },\n";
+    oss << "  \"gyroSensitivity\": " << config.gyroSensitivity << ",\n";
     oss << "  \"language\": \"" << config.language << "\",\n";
     oss << "  \"minimizeToTray\": " << (config.minimizeToTray ? "true" : "false") << ",\n";
     oss << "  \"autoCheckUpdate\": " << (config.autoCheckUpdate ? "true" : "false") << ",\n";
@@ -248,6 +250,11 @@ inline bool JSONToConfig(const std::string& json, AppConfig& config) {
             config.vibrationConfig.intensity = (float)ExtractJsonNumber(vibStr, "intensity", 1.0);
         }
     }
+
+    // Parse gyro sensitivity (default 1.0 preserves the original raw values)
+    config.gyroSensitivity = (float)ExtractJsonNumber(json, "gyroSensitivity", 1.0);
+    if (config.gyroSensitivity <= 0.0f || config.gyroSensitivity > 8.0f)
+        config.gyroSensitivity = 1.0f;
 
     // Parse language (with backward compatibility for old short codes)
     config.language = ExtractJsonString(json, "language");

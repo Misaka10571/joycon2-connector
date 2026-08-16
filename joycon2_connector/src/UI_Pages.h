@@ -24,7 +24,7 @@ struct AddDeviceWizard {
     ControllerType selectedType = ControllerType::SingleJoyCon;
     JoyConSide selectedSide = JoyConSide::Left;
     JoyConOrientation selectedOrientation = JoyConOrientation::Upright;
-    GyroSource selectedGyro = GyroSource::Both;
+    GyroSource selectedGyro = GyroSource::Right;
     bool scanStarted = false;
     float scanTimer = 0.0f;
     std::string statusMessage;
@@ -496,7 +496,7 @@ inline void RenderDashboard() {
 
             ImGui::BeginGroup();
             ImGui::Text("%s %d - %s", T("dash_player"), playerIndex, T("type_dual_joycon"));
-            const char* gyroName = T("dash_gyro_both");
+            const char* gyroName = T("dash_gyro_right");
             if (p->gyroSource == GyroSource::Left) gyroName = T("dash_gyro_left");
             else if (p->gyroSource == GyroSource::Right) gyroName = T("dash_gyro_right");
             ImGui::TextColored(UITheme::TextSecondary, "%s  |  %s: %s",
@@ -840,9 +840,6 @@ inline void RenderAddDevice(int& activePage) {
         } else if (g_wizard.selectedType == ControllerType::DualJoyCon) {
             // Gyro source
             ImGui::Text("%s", T("add_select_gyro"));
-            if (ImGui::RadioButton(T("dash_gyro_both"), g_wizard.selectedGyro == GyroSource::Both))
-                g_wizard.selectedGyro = GyroSource::Both;
-            ImGui::SameLine();
             if (ImGui::RadioButton(T("dash_gyro_left"), g_wizard.selectedGyro == GyroSource::Left))
                 g_wizard.selectedGyro = GyroSource::Left;
             ImGui::SameLine();
@@ -1311,6 +1308,25 @@ inline void RenderSettings() {
         ConfigManager::Instance().Save();
     }
     ImGui::TextColored(UITheme::TextTertiary, "%s", T("settings_minimize_to_tray_hint"));
+
+    EndCard();
+
+    ImGui::Spacing(); ImGui::Spacing();
+
+    // ---- Gyro sensitivity card ----
+    BeginCard();
+
+    ImGui::Text("%s", T("settings_gyro_sensitivity"));
+    ImGui::TextColored(UITheme::TextTertiary, "%s", T("settings_gyro_sensitivity_hint"));
+    ImGui::Spacing();
+
+    float gyroSliderW = (std::max)(ImGui::GetContentRegionAvail().x - S(100), S(120));
+    ImGui::SetNextItemWidth(gyroSliderW);
+    if (ImGui::SliderFloat("##gyroSensitivity",
+                           &ConfigManager::Instance().config.gyroSensitivity,
+                           0.10f, 8.0f, "%.2fx")) {
+        ConfigManager::Instance().Save();
+    }
 
     EndCard();
 

@@ -95,6 +95,8 @@
     "settings_title": "Settings",
     "settings_language": "Display Language",
     "settings_language_hint": "Select the interface language. Changes take effect immediately.",
+    "settings_gyro_sensitivity": "Gyro Sensitivity",
+    "settings_gyro_sensitivity_hint": "Adjust this multiplier if motion feels too strong or too weak (DS4 mode only, 1.00 = raw values)",
     "settings_about": "About",
     "settings_about_desc": "Connect Switch 2 Joy-Con to PC, emulating DS4 gamepad via ViGEmBus",
     "settings_about_author": "Maintained by Misaka 10571",
