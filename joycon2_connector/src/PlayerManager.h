@@ -31,6 +31,11 @@ struct VibrationContext {
     static constexpr int MIN_INTERVAL_MS = 50;     // throttle BLE writes
 };
 
+struct InputCallbackGate {
+    std::mutex mutex;
+    bool active = true;
+};
+
 // ViGEm DS4 vibration notification callback (runs on ViGEm worker thread)
 inline VOID CALLBACK DS4VibrationCallback(
     PVIGEM_CLIENT /*Client*/,
@@ -235,6 +240,8 @@ struct SingleJoyConPlayer {
     float accumY = 0.0f;
     // Vibration context for ViGEm callback
     std::unique_ptr<VibrationContext> vibCtx;
+    winrt::event_token inputChangedToken{};
+    std::shared_ptr<InputCallbackGate> inputCallbackGate = std::make_shared<InputCallbackGate>();
     // Interpolation state for high-frequency mouse output
     std::atomic<float> pendingDX{ 0.0f };
     std::atomic<float> pendingDY{ 0.0f };
@@ -256,9 +263,10 @@ struct SingleJoyConPlayer {
           firstOpticalRead(o.firstOpticalRead), scrollAccumulator(o.scrollAccumulator),
           mb4Pressed(o.mb4Pressed), mb5Pressed(o.mb5Pressed),
           leftBtnPressed(o.leftBtnPressed), rightBtnPressed(o.rightBtnPressed),
-          middleBtnPressed(o.middleBtnPressed), accumX(o.accumX), accumY(o.accumY),
-          vibCtx(std::move(o.vibCtx)),
-          pendingDX(o.pendingDX.load()), pendingDY(o.pendingDY.load()),
+           middleBtnPressed(o.middleBtnPressed), accumX(o.accumX), accumY(o.accumY),
+           vibCtx(std::move(o.vibCtx)),
+           inputChangedToken(o.inputChangedToken), inputCallbackGate(std::move(o.inputCallbackGate)),
+           pendingDX(o.pendingDX.load()), pendingDY(o.pendingDY.load()),
           newReportReady(o.newReportReady.load()), mouseInterpolActive(o.mouseInterpolActive.load()),
           lastBLETimestamp(o.lastBLETimestamp),
           reportIntervalMs(o.reportIntervalMs.load()),
@@ -275,6 +283,8 @@ struct SingleJoyConPlayer {
             leftBtnPressed = o.leftBtnPressed; rightBtnPressed = o.rightBtnPressed;
             middleBtnPressed = o.middleBtnPressed; accumX = o.accumX; accumY = o.accumY;
             vibCtx = std::move(o.vibCtx);
+            inputChangedToken = o.inputChangedToken;
+            inputCallbackGate = std::move(o.inputCallbackGate);
             pendingDX.store(o.pendingDX.load()); pendingDY.store(o.pendingDY.load());
             newReportReady.store(o.newReportReady.load()); mouseInterpolActive.store(o.mouseInterpolActive.load());
             lastBLETimestamp = o.lastBLETimestamp;
@@ -304,6 +314,9 @@ struct DualJoyConPlayer {
     std::mutex bufferMutex;
     std::condition_variable bufferCV;
     std::unique_ptr<VibrationContext> vibCtx;
+    winrt::event_token leftInputChangedToken{};
+    winrt::event_token rightInputChangedToken{};
+    std::shared_ptr<InputCallbackGate> inputCallbackGate = std::make_shared<InputCallbackGate>();
 };
 
 struct ProControllerPlayer {
@@ -316,6 +329,8 @@ struct ProControllerPlayer {
     std::shared_ptr<std::atomic<bool>> useRawVibrationFlag = std::make_shared<std::atomic<bool>>(true);
     std::shared_ptr<std::atomic<bool>> isXboxModeFlag = std::make_shared<std::atomic<bool>>(false);
     uint64_t bleAddress = 0;
+    winrt::event_token inputChangedToken{};
+    std::shared_ptr<InputCallbackGate> inputCallbackGate = std::make_shared<InputCallbackGate>();
 };
 
 // Button mapping application
@@ -487,6 +502,9 @@ public:
 
     // Add a Single JoyCon player from async scan result
     bool AddSingleJoyCon(ConnectedJoyCon cj, JoyConSide side, JoyConOrientation orientation) {
+        std::lock_guard<std::mutex> operationLock(playerOperationsMutex);
+        if (shuttingDown.load(std::memory_order_acquire)) return false;
+
         APP_LOG_INFO("Adding single Joy-Con (address: %llu, side: %d, orientation: %d)",
                      cj.bleAddress, static_cast<int>(side), static_cast<int>(orientation));
         if (!cj.inputChar) {
@@ -509,8 +527,8 @@ public:
             return false;
         }
 
-        singlePlayers.push_back(std::make_unique<SingleJoyConPlayer>(cj, target, side, orientation));
-        auto& player = *singlePlayers.back();
+        auto newPlayer = std::make_unique<SingleJoyConPlayer>(cj, target, side, orientation);
+        auto& player = *newPlayer;
         player.bleAddress = cj.bleAddress;
         player.swapABXY = ConfigManager::Instance().GetDeviceSettings(cj.bleAddress).swapABXY;
         player.isXboxMode = xboxMode;
@@ -527,11 +545,15 @@ public:
                 vigem.GetClient(), target, DS4VibrationCallback, player.vibCtx.get());
         }
 
-        player.joycon.inputChar.ValueChanged(
-            [joyconSide = player.side, joyconOrientation = player.orientation,
-             playerPtr = &player, &mouseConfig]
-            (GattCharacteristic const&, GattValueChangedEventArgs const& args)
-        {
+        try {
+            player.inputChangedToken = player.joycon.inputChar.ValueChanged(
+                [joyconSide = player.side, joyconOrientation = player.orientation,
+                 playerPtr = &player, callbackGate = player.inputCallbackGate, &mouseConfig]
+                (GattCharacteristic const&, GattValueChangedEventArgs const& args)
+            {
+                std::lock_guard<std::mutex> callbackLock(callbackGate->mutex);
+                if (!callbackGate->active) return;
+
             // Boost BLE callback thread priority once for lower input latency
             thread_local bool prioritySet = false;
             if (!prioritySet) {
@@ -719,7 +741,26 @@ public:
                 if (playerPtr->swapABXY) ApplyABXYSwap(report);
                 vigem_target_ds4_update_ex(ViGEmManager::Instance().GetClient(), playerPtr->ds4Controller, report);
             }
-        });
+            });
+        } catch (const winrt::hresult_error& e) {
+            APP_LOG_ERROR("Single Joy-Con input callback registration threw (address: %llu): %s",
+                          cj.bleAddress, BluetoothLog::DescribeHResultError(e).c_str());
+            if (xboxMode)
+                vigem_target_x360_unregister_notification(target);
+            else
+                vigem_target_ds4_unregister_notification(target);
+            vigem.RemoveTarget(target);
+            return false;
+        } catch (...) {
+            APP_LOG_ERROR("Single Joy-Con input callback registration threw an unknown exception (address: %llu)",
+                          cj.bleAddress);
+            if (xboxMode)
+                vigem_target_x360_unregister_notification(target);
+            else
+                vigem_target_ds4_unregister_notification(target);
+            vigem.RemoveTarget(target);
+            return false;
+        }
 
         GattCommunicationStatus status = GattCommunicationStatus::Success;
         try {
@@ -746,8 +787,26 @@ public:
         if (player.joycon.writeChar) {
             SendCustomCommands(player.joycon.writeChar);
             std::this_thread::sleep_for(std::chrono::milliseconds(200));
-            SetPlayerLEDs(player.joycon.writeChar, static_cast<uint8_t>(1 << (GetPlayerCount() - 1)));
+            SetPlayerLEDs(player.joycon.writeChar, static_cast<uint8_t>(1 << GetPlayerCount()));
             EmitSound(player.joycon.writeChar);
+        }
+
+        {
+            try {
+                std::lock_guard<std::mutex> playersLock(singlePlayersMutex);
+                singlePlayers.push_back(std::move(newPlayer));
+            } catch (...) {
+                DisableInputCallback(player.joycon.inputChar,
+                                     player.inputChangedToken,
+                                     player.inputCallbackGate);
+                if (xboxMode)
+                    vigem_target_x360_unregister_notification(target);
+                else
+                    vigem_target_ds4_unregister_notification(target);
+                vigem.RemoveTarget(target);
+                APP_LOG_ERROR("Failed to store single Joy-Con player (address: %llu)", cj.bleAddress);
+                return false;
+            }
         }
 
         // Start mouse interpolation thread (shared across all single joycons)
@@ -760,12 +819,15 @@ public:
 
     // Clear pending dual JoyCon state (release BLE references)
     void ClearPendingDual() {
-        pendingDualRight = ConnectedJoyCon{};
-        pendingDualGyro = GyroSource::Right;
+        std::lock_guard<std::mutex> operationLock(playerOperationsMutex);
+        ClearPendingDualUnlocked();
     }
 
     // Add Dual JoyCon player (needs two separate scans)
     bool AddDualJoyConFirstStep(ConnectedJoyCon rightJoyCon, GyroSource gyroSource) {
+        std::lock_guard<std::mutex> operationLock(playerOperationsMutex);
+        if (shuttingDown.load(std::memory_order_acquire)) return false;
+
         APP_LOG_INFO("Dual Joy-Con first step: right Joy-Con paired (address: %llu, gyro: %d)",
                      rightJoyCon.bleAddress, static_cast<int>(gyroSource));
         if (!rightJoyCon.inputChar) {
@@ -791,17 +853,20 @@ public:
     }
 
     bool AddDualJoyConSecondStep(ConnectedJoyCon leftJoyCon) {
+        std::lock_guard<std::mutex> operationLock(playerOperationsMutex);
+        if (shuttingDown.load(std::memory_order_acquire)) return false;
+
         APP_LOG_INFO("Dual Joy-Con second step: left Joy-Con paired (address: %llu)", leftJoyCon.bleAddress);
         if (!leftJoyCon.inputChar) {
             APP_LOG_ERROR("Left Joy-Con has no input-report characteristic (address: %llu); cannot subscribe",
                           leftJoyCon.bleAddress);
-            ClearPendingDual();
+            ClearPendingDualUnlocked();
             return false;
         }
         if (!pendingDualRight.inputChar) {
             APP_LOG_ERROR("Pending right Joy-Con has no input-report characteristic (address: %llu); cannot subscribe",
                           pendingDualRight.bleAddress);
-            ClearPendingDual();
+            ClearPendingDualUnlocked();
             return false;
         }
         if (leftJoyCon.writeChar) {
@@ -843,13 +908,30 @@ public:
                 vigem.GetClient(), target, DS4VibrationCallback, dp->vibCtx.get());
         }
 
-        dp->leftJoyCon.inputChar.ValueChanged([ptr = dp.get()](GattCharacteristic const&, GattValueChangedEventArgs const& args) {
-            auto reader = DataReader::FromBuffer(args.CharacteristicValue());
-            auto buf = std::make_shared<std::vector<uint8_t>>(reader.UnconsumedBufferLength());
-            reader.ReadBytes(*buf);
-            ptr->leftBufferAtomic.store(buf, std::memory_order_release);
-            ptr->bufferCV.notify_one();
-        });
+        try {
+            dp->leftInputChangedToken = dp->leftJoyCon.inputChar.ValueChanged(
+                [ptr = dp.get(), callbackGate = dp->inputCallbackGate]
+                (GattCharacteristic const&, GattValueChangedEventArgs const& args) {
+                std::lock_guard<std::mutex> callbackLock(callbackGate->mutex);
+                if (!callbackGate->active) return;
+                auto reader = DataReader::FromBuffer(args.CharacteristicValue());
+                auto buf = std::make_shared<std::vector<uint8_t>>(reader.UnconsumedBufferLength());
+                reader.ReadBytes(*buf);
+                ptr->leftBufferAtomic.store(buf, std::memory_order_release);
+                ptr->bufferCV.notify_one();
+            });
+        } catch (const winrt::hresult_error& e) {
+            APP_LOG_ERROR("Dual Joy-Con left input callback registration threw: %s",
+                          BluetoothLog::DescribeHResultError(e).c_str());
+            CleanupUnpublishedDual(*dp);
+            ClearPendingDualUnlocked();
+            return false;
+        } catch (...) {
+            APP_LOG_ERROR("Dual Joy-Con left input callback registration threw an unknown exception");
+            CleanupUnpublishedDual(*dp);
+            ClearPendingDualUnlocked();
+            return false;
+        }
 
         GattCommunicationStatus leftSubscribeStatus = GattCommunicationStatus::Success;
         try {
@@ -874,13 +956,30 @@ public:
                           BluetoothLog::DescribeGattStatus(leftSubscribeStatus).c_str());
         }
 
-        dp->rightJoyCon.inputChar.ValueChanged([ptr = dp.get()](GattCharacteristic const&, GattValueChangedEventArgs const& args) {
-            auto reader = DataReader::FromBuffer(args.CharacteristicValue());
-            auto buf = std::make_shared<std::vector<uint8_t>>(reader.UnconsumedBufferLength());
-            reader.ReadBytes(*buf);
-            ptr->rightBufferAtomic.store(buf, std::memory_order_release);
-            ptr->bufferCV.notify_one();
-        });
+        try {
+            dp->rightInputChangedToken = dp->rightJoyCon.inputChar.ValueChanged(
+                [ptr = dp.get(), callbackGate = dp->inputCallbackGate]
+                (GattCharacteristic const&, GattValueChangedEventArgs const& args) {
+                std::lock_guard<std::mutex> callbackLock(callbackGate->mutex);
+                if (!callbackGate->active) return;
+                auto reader = DataReader::FromBuffer(args.CharacteristicValue());
+                auto buf = std::make_shared<std::vector<uint8_t>>(reader.UnconsumedBufferLength());
+                reader.ReadBytes(*buf);
+                ptr->rightBufferAtomic.store(buf, std::memory_order_release);
+                ptr->bufferCV.notify_one();
+            });
+        } catch (const winrt::hresult_error& e) {
+            APP_LOG_ERROR("Dual Joy-Con right input callback registration threw: %s",
+                          BluetoothLog::DescribeHResultError(e).c_str());
+            CleanupUnpublishedDual(*dp);
+            ClearPendingDualUnlocked();
+            return false;
+        } catch (...) {
+            APP_LOG_ERROR("Dual Joy-Con right input callback registration threw an unknown exception");
+            CleanupUnpublishedDual(*dp);
+            ClearPendingDualUnlocked();
+            return false;
+        }
 
         GattCommunicationStatus rightSubscribeStatus = GattCommunicationStatus::Success;
         try {
@@ -905,43 +1004,53 @@ public:
                           BluetoothLog::DescribeGattStatus(rightSubscribeStatus).c_str());
         }
 
-        dp->updateThread = std::thread([ptr = dp.get()]() {
-            // Elevate merge thread priority for responsive dual JoyCon input
-            SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL);
-            std::shared_ptr<std::vector<uint8_t>> prevLeft, prevRight;
-            while (ptr->running.load(std::memory_order_acquire)) {
-                {
-                    std::unique_lock<std::mutex> lock(ptr->bufferMutex);
-                    ptr->bufferCV.wait_for(lock, std::chrono::milliseconds(2));
+        try {
+            dp->updateThread = std::thread([ptr = dp.get()]() {
+                // Elevate merge thread priority for responsive dual JoyCon input
+                SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL);
+                std::shared_ptr<std::vector<uint8_t>> prevLeft, prevRight;
+                while (ptr->running.load(std::memory_order_acquire)) {
+                    {
+                        std::unique_lock<std::mutex> lock(ptr->bufferMutex);
+                        ptr->bufferCV.wait_for(lock, std::chrono::milliseconds(2));
+                    }
+                    auto leftBuf = ptr->leftBufferAtomic.load(std::memory_order_acquire);
+                    auto rightBuf = ptr->rightBufferAtomic.load(std::memory_order_acquire);
+                    if (leftBuf->empty() || rightBuf->empty()) continue;
+                    // Submit update if either side has new data (don't wait for both)
+                    if (leftBuf == prevLeft && rightBuf == prevRight) continue;
+                    prevLeft = leftBuf;
+                    prevRight = rightBuf;
+                    if (ptr->isXboxMode) {
+                        XUSB_REPORT xreport = GenerateDualJoyConXUSBReport(*leftBuf, *rightBuf);
+                        if (ptr->swapABXY) ApplyABXYSwapXUSB(xreport);
+                        vigem_target_x360_update(ViGEmManager::Instance().GetClient(), ptr->ds4Controller, xreport);
+                    } else {
+                        DS4_REPORT_EX report = GenerateDualJoyConDS4Report(*leftBuf, *rightBuf, ptr->gyroSource);
+                        ApplyGyroSensitivity(report, ConfigManager::Instance().config.gyroSensitivity);
+                        if (ptr->swapABXY) ApplyABXYSwap(report);
+                        vigem_target_ds4_update_ex(ViGEmManager::Instance().GetClient(), ptr->ds4Controller, report);
+                    }
                 }
-                auto leftBuf = ptr->leftBufferAtomic.load(std::memory_order_acquire);
-                auto rightBuf = ptr->rightBufferAtomic.load(std::memory_order_acquire);
-                if (leftBuf->empty() || rightBuf->empty()) continue;
-                // Submit update if either side has new data (don't wait for both)
-                if (leftBuf == prevLeft && rightBuf == prevRight) continue;
-                prevLeft = leftBuf;
-                prevRight = rightBuf;
-                if (ptr->isXboxMode) {
-                    XUSB_REPORT xreport = GenerateDualJoyConXUSBReport(*leftBuf, *rightBuf);
-                    if (ptr->swapABXY) ApplyABXYSwapXUSB(xreport);
-                    vigem_target_x360_update(ViGEmManager::Instance().GetClient(), ptr->ds4Controller, xreport);
-                } else {
-                    DS4_REPORT_EX report = GenerateDualJoyConDS4Report(*leftBuf, *rightBuf, ptr->gyroSource);
-                    ApplyGyroSensitivity(report, ConfigManager::Instance().config.gyroSensitivity);
-                    if (ptr->swapABXY) ApplyABXYSwap(report);
-                    vigem_target_ds4_update_ex(ViGEmManager::Instance().GetClient(), ptr->ds4Controller, report);
-                }
-            }
-        });
+            });
+        } catch (...) {
+            APP_LOG_ERROR("Failed to start dual Joy-Con update thread");
+            CleanupUnpublishedDual(*dp);
+            ClearPendingDualUnlocked();
+            return false;
+        }
 
         dualPlayers.push_back(std::move(dp));
-        ClearPendingDual();  // Release extra BLE references so disconnect works for right Joy-Con
+        ClearPendingDualUnlocked();  // Release extra BLE references so disconnect works for right Joy-Con
         APP_LOG_INFO("Dual Joy-Con add completed (total players: %d)", GetPlayerCount());
         return true;
     }
 
     // Add Pro Controller or NSO GC
     bool AddProOrGC(ConnectedJoyCon controller, ControllerType type) {
+        std::lock_guard<std::mutex> operationLock(playerOperationsMutex);
+        if (shuttingDown.load(std::memory_order_acquire)) return false;
+
         APP_LOG_INFO("Adding Pro/NSO-GC controller (address: %llu, type: %d)",
                      controller.bleAddress, static_cast<int>(type));
         if (!controller.inputChar) {
@@ -975,10 +1084,14 @@ public:
         auto rawVibFlag = std::make_shared<std::atomic<bool>>(
             ConfigManager::Instance().GetDeviceSettings(controller.bleAddress).useRawVibration);
         auto xboxModeFlag = std::make_shared<std::atomic<bool>>(xboxMode);
+        auto inputCallbackGate = std::make_shared<InputCallbackGate>();
+        winrt::event_token inputChangedToken{};
 
         if (type == ControllerType::ProController) {
             if (xboxMode) {
-                controller.inputChar.ValueChanged([target, swapFlag](GattCharacteristic const&, GattValueChangedEventArgs const& args) mutable {
+                inputChangedToken = controller.inputChar.ValueChanged([target, swapFlag, inputCallbackGate](GattCharacteristic const&, GattValueChangedEventArgs const& args) mutable {
+                    std::lock_guard<std::mutex> callbackLock(inputCallbackGate->mutex);
+                    if (!inputCallbackGate->active) return;
                     thread_local bool prioritySet = false;
                     if (!prioritySet) { SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL); prioritySet = true; }
                     auto reader = DataReader::FromBuffer(args.CharacteristicValue());
@@ -991,7 +1104,9 @@ public:
                     vigem_target_x360_update(ViGEmManager::Instance().GetClient(), target, xreport);
                 });
             } else {
-                controller.inputChar.ValueChanged([target, swapFlag](GattCharacteristic const&, GattValueChangedEventArgs const& args) mutable {
+                inputChangedToken = controller.inputChar.ValueChanged([target, swapFlag, inputCallbackGate](GattCharacteristic const&, GattValueChangedEventArgs const& args) mutable {
+                    std::lock_guard<std::mutex> callbackLock(inputCallbackGate->mutex);
+                    if (!inputCallbackGate->active) return;
                     thread_local bool prioritySet = false;
                     if (!prioritySet) { SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL); prioritySet = true; }
                     auto reader = DataReader::FromBuffer(args.CharacteristicValue());
@@ -1007,7 +1122,9 @@ public:
             }
         } else {
             if (xboxMode) {
-                controller.inputChar.ValueChanged([target, swapFlag](GattCharacteristic const&, GattValueChangedEventArgs const& args) mutable {
+                inputChangedToken = controller.inputChar.ValueChanged([target, swapFlag, inputCallbackGate](GattCharacteristic const&, GattValueChangedEventArgs const& args) mutable {
+                    std::lock_guard<std::mutex> callbackLock(inputCallbackGate->mutex);
+                    if (!inputCallbackGate->active) return;
                     thread_local bool prioritySet = false;
                     if (!prioritySet) { SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL); prioritySet = true; }
                     auto reader = DataReader::FromBuffer(args.CharacteristicValue());
@@ -1018,7 +1135,9 @@ public:
                     vigem_target_x360_update(ViGEmManager::Instance().GetClient(), target, xreport);
                 });
             } else {
-                controller.inputChar.ValueChanged([target, swapFlag](GattCharacteristic const&, GattValueChangedEventArgs const& args) mutable {
+                inputChangedToken = controller.inputChar.ValueChanged([target, swapFlag, inputCallbackGate](GattCharacteristic const&, GattValueChangedEventArgs const& args) mutable {
+                    std::lock_guard<std::mutex> callbackLock(inputCallbackGate->mutex);
+                    if (!inputCallbackGate->active) return;
                     thread_local bool prioritySet = false;
                     if (!prioritySet) { SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL); prioritySet = true; }
                     auto reader = DataReader::FromBuffer(args.CharacteristicValue());
@@ -1066,6 +1185,8 @@ public:
 
         // Register vibration callback for pro/GC controller
         auto& pp = proPlayers.back();
+        pp.inputChangedToken = inputChangedToken;
+        pp.inputCallbackGate = inputCallbackGate;
         pp.vibCtx = std::make_unique<VibrationContext>();
         pp.vibCtx->writeChar = controller.writeChar;
         pp.vibCtx->useRawVibration = rawVibFlag;
@@ -1083,9 +1204,14 @@ public:
 
     // Remove player by index across all types
     void RemovePlayerByGlobalIndex(int globalIdx) {
+        std::lock_guard<std::mutex> operationLock(playerOperationsMutex);
         APP_LOG_INFO("Removing player at global index %d", globalIdx);
         int idx = globalIdx;
+        std::unique_lock<std::mutex> singlePlayersLock(singlePlayersMutex);
         if (idx < (int)singlePlayers.size()) {
+            DisableInputCallback(singlePlayers[idx]->joycon.inputChar,
+                                 singlePlayers[idx]->inputChangedToken,
+                                 singlePlayers[idx]->inputCallbackGate);
             if (singlePlayers[idx]->isXboxMode)
                 vigem_target_x360_unregister_notification(singlePlayers[idx]->ds4Controller);
             else
@@ -1095,9 +1221,16 @@ public:
             return;
         }
         idx -= (int)singlePlayers.size();
+        singlePlayersLock.unlock();
         if (idx < (int)dualPlayers.size()) {
             dualPlayers[idx]->running.store(false);
+            dualPlayers[idx]->bufferCV.notify_one();
             if (dualPlayers[idx]->updateThread.joinable()) dualPlayers[idx]->updateThread.join();
+            DisableInputCallback(dualPlayers[idx]->leftJoyCon.inputChar,
+                                 dualPlayers[idx]->leftInputChangedToken,
+                                 dualPlayers[idx]->inputCallbackGate);
+            UnregisterInputCallback(dualPlayers[idx]->rightJoyCon.inputChar,
+                                    dualPlayers[idx]->rightInputChangedToken);
             if (dualPlayers[idx]->isXboxMode)
                 vigem_target_x360_unregister_notification(dualPlayers[idx]->ds4Controller);
             else
@@ -1108,6 +1241,9 @@ public:
         }
         idx -= (int)dualPlayers.size();
         if (idx < (int)proPlayers.size()) {
+            DisableInputCallback(proPlayers[idx].controller.inputChar,
+                                 proPlayers[idx].inputChangedToken,
+                                 proPlayers[idx].inputCallbackGate);
             if (proPlayers[idx].isXboxModeFlag->load(std::memory_order_relaxed))
                 vigem_target_x360_unregister_notification(proPlayers[idx].ds4Controller);
             else
@@ -1119,6 +1255,9 @@ public:
     }
 
     void Shutdown() {
+        if (shuttingDown.exchange(true, std::memory_order_acq_rel)) return;
+        std::lock_guard<std::mutex> operationLock(playerOperationsMutex);
+
         APP_LOG_INFO("PlayerManager shutdown: disconnecting %d player(s)", GetPlayerCount());
         // Stop mouse interpolation thread
         mouseInterpolRunning.store(false);
@@ -1126,7 +1265,12 @@ public:
 
         for (auto& dp : dualPlayers) {
             dp->running.store(false);
+            dp->bufferCV.notify_one();
             if (dp->updateThread.joinable()) dp->updateThread.join();
+            DisableInputCallback(dp->leftJoyCon.inputChar,
+                                 dp->leftInputChangedToken,
+                                 dp->inputCallbackGate);
+            UnregisterInputCallback(dp->rightJoyCon.inputChar, dp->rightInputChangedToken);
             if (dp->isXboxMode)
                 vigem_target_x360_unregister_notification(dp->ds4Controller);
             else
@@ -1135,6 +1279,9 @@ public:
         }
         dualPlayers.clear();
         for (auto& sp : singlePlayers) {
+            DisableInputCallback(sp->joycon.inputChar,
+                                 sp->inputChangedToken,
+                                 sp->inputCallbackGate);
             if (sp->isXboxMode)
                 vigem_target_x360_unregister_notification(sp->ds4Controller);
             else
@@ -1143,6 +1290,9 @@ public:
         }
         singlePlayers.clear();
         for (auto& pp : proPlayers) {
+            DisableInputCallback(pp.controller.inputChar,
+                                 pp.inputChangedToken,
+                                 pp.inputCallbackGate);
             if (pp.isXboxModeFlag->load(std::memory_order_relaxed))
                 vigem_target_x360_unregister_notification(pp.ds4Controller);
             else
@@ -1163,6 +1313,53 @@ private:
     // Mouse interpolation thread
     std::thread mouseInterpolThread;
     std::atomic<bool> mouseInterpolRunning{ false };
+    std::mutex singlePlayersMutex;
+    std::mutex playerOperationsMutex;
+    std::atomic<bool> shuttingDown{ false };
+
+    static void UnregisterInputCallback(const GattCharacteristic& inputChar,
+                                        winrt::event_token token) {
+        if (!inputChar || token.value == 0) return;
+        try {
+            inputChar.ValueChanged(token);
+        } catch (const winrt::hresult_error& e) {
+            APP_LOG_WARNING("Failed to unregister BLE input callback: %s",
+                            BluetoothLog::DescribeHResultError(e).c_str());
+        } catch (...) {
+            APP_LOG_WARNING("Failed to unregister BLE input callback: unknown exception");
+        }
+    }
+
+    static void DisableInputCallback(const GattCharacteristic& inputChar,
+                                     winrt::event_token token,
+                                     const std::shared_ptr<InputCallbackGate>& callbackGate) {
+        if (callbackGate) {
+            std::lock_guard<std::mutex> callbackLock(callbackGate->mutex);
+            callbackGate->active = false;
+        }
+        UnregisterInputCallback(inputChar, token);
+    }
+
+    void ClearPendingDualUnlocked() {
+        pendingDualRight = ConnectedJoyCon{};
+        pendingDualGyro = GyroSource::Right;
+    }
+
+    static void CleanupUnpublishedDual(DualJoyConPlayer& player) {
+        player.running.store(false, std::memory_order_release);
+        player.bufferCV.notify_one();
+        if (player.updateThread.joinable()) player.updateThread.join();
+        DisableInputCallback(player.leftJoyCon.inputChar,
+                             player.leftInputChangedToken,
+                             player.inputCallbackGate);
+        UnregisterInputCallback(player.rightJoyCon.inputChar,
+                                player.rightInputChangedToken);
+        if (player.isXboxMode)
+            vigem_target_x360_unregister_notification(player.ds4Controller);
+        else
+            vigem_target_ds4_unregister_notification(player.ds4Controller);
+        ViGEmManager::Instance().RemoveTarget(player.ds4Controller);
+    }
 
     void StartMouseInterpolThread() {
         if (mouseInterpolRunning.load()) return; // already running
@@ -1186,6 +1383,8 @@ private:
                 if (rateHz < 100) rateHz = 100;
                 if (rateHz > 500) rateHz = 500;
                 float tickMs = 1000.0f / rateHz;
+
+                std::lock_guard<std::mutex> playersLock(singlePlayersMutex);
 
                 // Ensure states vector matches player count
                 if (states.size() < singlePlayers.size()) {

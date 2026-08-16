@@ -29,6 +29,12 @@ constexpr uint32_t BUTTON_MINUS_MASK_LEFT = 0x000100;
 constexpr uint32_t BUTTON_L_MASK_LEFT = 0x000040;
 constexpr uint32_t BUTTON_STICK_MASK_LEFT = 0x000800;
 
+static void InitializeDS4Report(DS4_REPORT_EX& report) {
+    DS4_REPORT_INIT(reinterpret_cast<PDS4_REPORT>(&report.Report));
+    report.Report.bBatteryLvl = 0xFF;
+    report.Report.bBatteryLvlSpecial = 0x1A; // Wired, 100% battery
+}
+
 StickData DecodeJoystick(const std::vector<uint8_t>& buffer, JoyConSide side, JoyConOrientation orientation) {
     if (buffer.size() < 16) {
         return { 0, 0, 0, 0 };
@@ -111,7 +117,7 @@ static void decode_triggers_shoulders(uint32_t state, bool isLeft, bool upright,
 
 DS4_REPORT_EX GenerateDS4Report(const std::vector<uint8_t>& buffer, JoyConSide side, JoyConOrientation orientation) {
     DS4_REPORT_EX report{};
-    DS4_REPORT_INIT(reinterpret_cast<PDS4_REPORT>(&report.Report));
+    InitializeDS4Report(report);
 
     if (buffer.size() < 0x3C) return report;
 
@@ -188,7 +194,7 @@ DS4_REPORT_EX GenerateDS4Report(const std::vector<uint8_t>& buffer, JoyConSide s
 DS4_REPORT_EX GenerateDualJoyConDS4Report(const std::vector<uint8_t>& leftBuffer, const std::vector<uint8_t>& rightBuffer, GyroSource gyroSource)
 {
     DS4_REPORT_EX report{};
-    DS4_REPORT_INIT(reinterpret_cast<PDS4_REPORT>(&report.Report));
+    InitializeDS4Report(report);
 
     if (leftBuffer.size() < 0x3C && rightBuffer.size() < 0x3C) {
         return report;
@@ -341,7 +347,7 @@ constexpr uint64_t TRIGGER_RT_MASK = 0x008000000000;
 DS4_REPORT_EX GenerateProControllerReport(const std::vector<uint8_t>& buffer)
 {
     DS4_REPORT_EX report{};
-    DS4_REPORT_INIT(reinterpret_cast<PDS4_REPORT>(&report.Report));
+    InitializeDS4Report(report);
 
     if (buffer.size() < 0x3C) {
         return report;
@@ -428,7 +434,7 @@ DS4_REPORT_EX GenerateProControllerReport(const std::vector<uint8_t>& buffer)
 DS4_REPORT_EX GenerateNSOGCReport(const std::vector<uint8_t>& buffer)
 {
     DS4_REPORT_EX report{};
-    DS4_REPORT_INIT(reinterpret_cast<PDS4_REPORT>(&report.Report));
+    InitializeDS4Report(report);
 
     // Need at least 0x3E bytes: indices 0x3c and 0x3d are accessed for trigger values
     if (buffer.size() < 0x3E) {
