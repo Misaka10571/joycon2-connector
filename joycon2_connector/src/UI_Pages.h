@@ -42,6 +42,15 @@ inline int g_selectedLayoutIndex = 0;
 inline char g_layoutNameBuf[128] = {};
 inline bool g_renamingLayout = false;
 
+inline bool UseXboxBackButtonNames() {
+    for (auto& player : PlayerManager::Instance().GetProPlayers()) {
+        if (player.type == ControllerType::ProController) {
+            return player.isXboxModeFlag->load(std::memory_order_relaxed);
+        }
+    }
+    return false;
+}
+
 // Xbox emulation warning popup state
 static bool g_xboxWarningPopupOpen = false;
 static uint64_t g_xboxWarningBleAddress = 0;  // BLE address of controller being toggled
@@ -627,9 +636,10 @@ inline void RenderDashboard() {
                 auto& config = ConfigManager::Instance().config.proConfig;
                 if (!config.layouts.empty()) {
                     auto& layout = config.layouts[config.activeLayoutIndex];
+                    bool xboxMode = p.isXboxModeFlag->load(std::memory_order_relaxed);
                     ImGui::TextColored(UITheme::TextTertiary, "GL: %s  GR: %s  [%s]",
-                        ButtonMappingToString(layout.glMapping).c_str(),
-                        ButtonMappingToString(layout.grMapping).c_str(),
+                        ButtonMappingDisplayName(layout.glMapping, xboxMode),
+                        ButtonMappingDisplayName(layout.grMapping, xboxMode),
                         layout.name.c_str());
                 }
             }
@@ -901,9 +911,9 @@ inline void RenderAddDevice(int& activePage) {
     } else if (g_wizard.step == 2) {
         // Step 3: Scanning
         if (g_wizard.selectedType == ControllerType::DualJoyCon && !g_wizard.dualFirstDone) {
-            SectionLabel(T("add_scan_right_title"));
+            SectionLabel(T(g_wizard.scanStarted ? "add_scan_right_title" : "add_wait_scan_right_title"));
         } else {
-            SectionLabel(T("add_step3_title"));
+            SectionLabel(T(g_wizard.scanStarted ? "add_step3_title" : "add_wait_scan_title"));
         }
 
         ImGui::Spacing();
@@ -1003,7 +1013,7 @@ inline void RenderAddDevice(int& activePage) {
 
     } else if (g_wizard.step == 4) {
         // Step 5 (Dual JoyCon only): Scan LEFT Joy-Con
-        SectionLabel(T("add_scan_left_title"));
+        SectionLabel(T(g_wizard.scanStarted ? "add_scan_left_title" : "add_wait_scan_left_title"));
         ImGui::Spacing();
 
         if (!g_wizard.scanStarted) {
@@ -1065,6 +1075,8 @@ inline void RenderLayoutManager() {
     SectionLabel(T("layout_title"));
 
     auto& config = ConfigManager::Instance().config.proConfig;
+    bool xboxMode = UseXboxBackButtonNames();
+    const char* const* mappingNames = xboxMode ? ButtonMappingXboxNames : ButtonMappingNames;
     float totalW = ImGui::GetContentRegionAvail().x;
     float leftW = (std::max)(totalW * 0.35f, S(320));
     float availH = ImGui::GetContentRegionAvail().y;
@@ -1073,7 +1085,7 @@ inline void RenderLayoutManager() {
     ImGui::BeginChild("LeftPanel", ImVec2(leftW, availH), ImGuiChildFlags_None);
 
     // Layout list (scrollable)
-    float btnRowH = S(56);
+    float btnRowH = S(72); // 40dp buttons with 16dp spacing above and below
     ImGui::BeginChild("LayoutList", ImVec2(-1, ImGui::GetContentRegionAvail().y - btnRowH), ImGuiChildFlags_None);
 
     for (int i = 0; i < (int)config.layouts.size(); ++i) {
@@ -1161,7 +1173,7 @@ inline void RenderLayoutManager() {
         ImGui::Text("%s", T("layout_gl"));
         ImGui::SetNextItemWidth(S(220));
         int glIdx = static_cast<int>(layout.glMapping);
-        if (ImGui::Combo("##gl", &glIdx, ButtonMappingNames, ButtonMappingCount)) {
+        if (ImGui::Combo("##gl", &glIdx, mappingNames, ButtonMappingCount)) {
             layout.glMapping = static_cast<ButtonMapping>(glIdx);
             ConfigManager::Instance().Save();
         }
@@ -1172,7 +1184,7 @@ inline void RenderLayoutManager() {
         ImGui::Text("%s", T("layout_gr"));
         ImGui::SetNextItemWidth(S(220));
         int grIdx = static_cast<int>(layout.grMapping);
-        if (ImGui::Combo("##gr", &grIdx, ButtonMappingNames, ButtonMappingCount)) {
+        if (ImGui::Combo("##gr", &grIdx, mappingNames, ButtonMappingCount)) {
             layout.grMapping = static_cast<ButtonMapping>(grIdx);
             ConfigManager::Instance().Save();
         }

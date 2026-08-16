@@ -111,7 +111,19 @@ inline const char* ButtonMappingNames[] = {
     "SHARE", "OPTIONS",
     "DPAD_UP", "DPAD_DOWN", "DPAD_LEFT", "DPAD_RIGHT"
 };
+inline const char* ButtonMappingXboxNames[] = {
+    "NONE", "LS", "RS", "LB", "RB", "LT", "RT",
+    "A", "B", "X", "Y",
+    "BACK", "START",
+    "DPAD_UP", "DPAD_DOWN", "DPAD_LEFT", "DPAD_RIGHT"
+};
 inline constexpr int ButtonMappingCount = 17;
+
+inline const char* ButtonMappingDisplayName(ButtonMapping mapping, bool xboxMode) {
+    int index = static_cast<int>(mapping);
+    if (index < 0 || index >= ButtonMappingCount) index = 0;
+    return xboxMode ? ButtonMappingXboxNames[index] : ButtonMappingNames[index];
+}
 
 // Simple JSON serialization
 inline std::string ConfigToJSON(const AppConfig& config) {
