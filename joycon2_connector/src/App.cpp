@@ -941,6 +941,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
     // Cleanup
     APP_LOG_INFO("Normal shutdown initiated");
     RemoveTrayIcon();
+    DeviceManager::Instance().StopScan();
     PlayerManager::Instance().Shutdown();
     ViGEmManager::Instance().Shutdown();
     ConfigManager::Instance().Save();
