@@ -8,3 +8,4 @@ docs/
 command_handler.lua
 common.lua
 input_handler.lua
+AGENTS.md

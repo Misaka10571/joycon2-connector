@@ -9,16 +9,69 @@
 #include <winrt/Windows.Devices.Bluetooth.Advertisement.h>
 #include <winrt/Windows.Devices.Bluetooth.GenericAttributeProfile.h>
 
+#include <cstddef>
+#include <cstdint>
 #include <cstdio>
 #include <string>
 
 namespace BluetoothLog {
 
 using winrt::Windows::Foundation::IReference;
+using winrt::Windows::Devices::Bluetooth::BluetoothAddressType;
 using winrt::Windows::Devices::Bluetooth::BluetoothConnectionStatus;
 using winrt::Windows::Devices::Bluetooth::BluetoothError;
 using winrt::Windows::Devices::Bluetooth::BluetoothLEPreferredConnectionParametersRequestStatus;
+using winrt::Windows::Devices::Bluetooth::Advertisement::BluetoothLEAdvertisementType;
 using winrt::Windows::Devices::Bluetooth::GenericAttributeProfile::GattCommunicationStatus;
+
+inline const char* AdvertisementTypeName(BluetoothLEAdvertisementType type) {
+    switch (type) {
+    case BluetoothLEAdvertisementType::ConnectableUndirected:    return "ConnectableUndirected";
+    case BluetoothLEAdvertisementType::ConnectableDirected:      return "ConnectableDirected";
+    case BluetoothLEAdvertisementType::ScannableUndirected:      return "ScannableUndirected";
+    case BluetoothLEAdvertisementType::NonConnectableUndirected: return "NonConnectableUndirected";
+    case BluetoothLEAdvertisementType::ScanResponse:             return "ScanResponse";
+    case BluetoothLEAdvertisementType::Extended:                 return "Extended";
+    default:                                                     return "Unknown";
+    }
+}
+
+inline const char* AdvertisementConnectabilityName(BluetoothLEAdvertisementType type) {
+    switch (type) {
+    case BluetoothLEAdvertisementType::ConnectableUndirected:
+    case BluetoothLEAdvertisementType::ConnectableDirected:
+        return "yes";
+    case BluetoothLEAdvertisementType::ScannableUndirected:
+    case BluetoothLEAdvertisementType::NonConnectableUndirected:
+        return "no";
+    case BluetoothLEAdvertisementType::ScanResponse:
+    default:
+        return "unknown";
+    }
+}
+
+inline const char* AddressTypeName(BluetoothAddressType type) {
+    switch (type) {
+    case BluetoothAddressType::Public:      return "Public";
+    case BluetoothAddressType::Random:      return "Random";
+    case BluetoothAddressType::Unspecified: return "Unspecified";
+    default:                                return "Unknown";
+    }
+}
+
+inline std::string BytesToHex(const uint8_t* data, size_t size) {
+    if (!data || size == 0) return "<empty>";
+
+    std::string result;
+    result.reserve(size * 3 - 1);
+    for (size_t i = 0; i < size; ++i) {
+        char byte[3];
+        sprintf_s(byte, "%02X", data[i]);
+        if (i != 0) result += ' ';
+        result += byte;
+    }
+    return result;
+}
 
 inline const char* BluetoothErrorName(BluetoothError error) {
     switch (error) {

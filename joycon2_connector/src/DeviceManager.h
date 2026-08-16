@@ -6,6 +6,10 @@
 #include <winrt/Windows.Devices.Bluetooth.h>
 #include <winrt/Windows.Devices.Bluetooth.Advertisement.h>
 #include <winrt/Windows.Devices.Bluetooth.GenericAttributeProfile.h>
+#include <winrt/Windows.Devices.Enumeration.h>
+#include <algorithm>
+#include <chrono>
+#include <condition_variable>
 #include <vector>
 #include <mutex>
 #include <atomic>
@@ -35,6 +39,17 @@ struct ConnectedJoyCon {
 
 enum class ScanState { Idle, Scanning, Found, Error, Timeout };
 
+inline const char* ScanStateName(ScanState state) {
+    switch (state) {
+    case ScanState::Idle:     return "Idle";
+    case ScanState::Scanning: return "Scanning";
+    case ScanState::Found:    return "Found";
+    case ScanState::Error:    return "Error";
+    case ScanState::Timeout:  return "Timeout";
+    default:                  return "Unknown";
+    }
+}
+
 class DeviceManager {
 public:
     static DeviceManager& Instance() {
@@ -52,7 +67,11 @@ public:
             return;
         }
         
-        APP_LOG_INFO("Starting BLE scan for Nintendo Switch 2 controller");
+        APP_LOG_INFO("Starting BLE scan for Nintendo Switch 2 controller "
+                     "(timeout: 30 s, manufacturer ID: 0x%04X, required prefix: %s)",
+                     JOYCON_MANUFACTURER_ID,
+                     BluetoothLog::BytesToHex(JOYCON_MANUFACTURER_PREFIX.data(),
+                                              JOYCON_MANUFACTURER_PREFIX.size()).c_str());
         state.store(ScanState::Scanning);
         scanCallback = callback;
 
@@ -99,8 +118,13 @@ private:
         cancelScan.store(false);
         ConnectedJoyCon cj{};
         BluetoothLEDevice device = nullptr;
-        std::atomic<bool> connected{ false };
+        std::atomic<bool> candidateClaimed{ false };
+        std::atomic<bool> deviceReady{ false };
         std::atomic<bool> watcherFailed{ false };
+        std::atomic<uint32_t> advertisementsReceived{ 0 };
+        std::atomic<uint32_t> nintendoAdvertisementsReceived{ 0 };
+        std::atomic<uint32_t> matchingAdvertisementsReceived{ 0 };
+        auto scanStarted = std::chrono::steady_clock::now();
 
         BluetoothLEAdvertisementWatcher watcher;
         std::mutex mtx;
@@ -108,71 +132,127 @@ private:
 
         watcher.Received([&](auto const&, auto const& args) {
             try {
-                if (connected.load(std::memory_order_acquire)) return;
+                if (candidateClaimed.load(std::memory_order_acquire)) return;
                 if (cancelScan.load()) return;
 
+                advertisementsReceived.fetch_add(1, std::memory_order_relaxed);
                 uint64_t address = args.BluetoothAddress();
-                APP_LOG_DEBUG("BLE advertisement received (address: %llu, RSSI: %d dBm)",
-                              address, args.RawSignalStrengthInDBm());
+                auto advertisementType = args.AdvertisementType();
+                APP_LOG_DEBUG("BLE advertisement received (address: %llu, RSSI: %d dBm, type: %s (%d), connectable: %s)",
+                              address, args.RawSignalStrengthInDBm(),
+                              BluetoothLog::AdvertisementTypeName(advertisementType),
+                              static_cast<int>(advertisementType),
+                              BluetoothLog::AdvertisementConnectabilityName(advertisementType));
 
                 auto mfg = args.Advertisement().ManufacturerData();
                 for (uint32_t i = 0; i < mfg.Size(); i++) {
                     auto section = mfg.GetAt(i);
                     if (section.CompanyId() != JOYCON_MANUFACTURER_ID) continue;
 
+                    nintendoAdvertisementsReceived.fetch_add(1, std::memory_order_relaxed);
+
                     auto reader = DataReader::FromBuffer(section.Data());
                     std::vector<uint8_t> data(reader.UnconsumedBufferLength());
                     reader.ReadBytes(data);
+                    std::string manufacturerData = BluetoothLog::BytesToHex(data.data(), data.size());
                     if (data.size() >= JOYCON_MANUFACTURER_PREFIX.size() &&
                         std::equal(JOYCON_MANUFACTURER_PREFIX.begin(), JOYCON_MANUFACTURER_PREFIX.end(), data.begin())) {
+                        matchingAdvertisementsReceived.fetch_add(1, std::memory_order_relaxed);
 
                         bool expected = false;
-                        if (!connected.compare_exchange_strong(expected, true, std::memory_order_acq_rel))
+                        if (!candidateClaimed.compare_exchange_strong(expected, true, std::memory_order_acq_rel))
                             return;
+                        cv.notify_one();
 
-                        APP_LOG_INFO("Matching Joy-Con advertisement found (address: %llu, RSSI: %d dBm)",
-                                     address, args.RawSignalStrengthInDBm());
+                        auto scanElapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::steady_clock::now() - scanStarted).count();
+                        std::string localName = winrt::to_string(args.Advertisement().LocalName());
+                        APP_LOG_INFO("Matching Joy-Con advertisement found (address: %llu, RSSI: %d dBm, "
+                                     "type: %s (%d), connectable: %s, local_name: \"%s\", "
+                                     "manufacturer_data: %s, scan_elapsed: %lld ms)",
+                                     address, args.RawSignalStrengthInDBm(),
+                                     BluetoothLog::AdvertisementTypeName(advertisementType),
+                                     static_cast<int>(advertisementType),
+                                     BluetoothLog::AdvertisementConnectabilityName(advertisementType),
+                                     localName.c_str(), manufacturerData.c_str(), scanElapsedMs);
 
                         BluetoothLEDevice dev = nullptr;
+                        auto createStarted = std::chrono::steady_clock::now();
                         try {
                             dev = BluetoothLEDevice::FromBluetoothAddressAsync(address).get();
                         } catch (const winrt::hresult_error& e) {
-                            APP_LOG_ERROR("Failed to create BluetoothLEDevice for address %llu: %s",
-                                          address, BluetoothLog::DescribeHResultError(e).c_str());
-                            connected.store(false, std::memory_order_release);
+                            auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                std::chrono::steady_clock::now() - createStarted).count();
+                            APP_LOG_ERROR("Failed to create BluetoothLEDevice for address %llu after %lld ms: %s",
+                                          address, elapsedMs, BluetoothLog::DescribeHResultError(e).c_str());
+                            candidateClaimed.store(false, std::memory_order_release);
+                            cv.notify_one();
                             return;
                         } catch (...) {
-                            APP_LOG_ERROR("Failed to create BluetoothLEDevice for address %llu: unknown exception",
-                                          address);
-                            connected.store(false, std::memory_order_release);
+                            auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                std::chrono::steady_clock::now() - createStarted).count();
+                            APP_LOG_ERROR("Failed to create BluetoothLEDevice for address %llu after %lld ms: unknown exception",
+                                          address, elapsedMs);
+                            candidateClaimed.store(false, std::memory_order_release);
+                            cv.notify_one();
                             return;
                         }
 
                         if (!dev) {
-                            APP_LOG_WARNING("BluetoothLEDevice::FromBluetoothAddressAsync returned null for address %llu",
-                                            address);
-                            connected.store(false, std::memory_order_release);
+                            auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                std::chrono::steady_clock::now() - createStarted).count();
+                            APP_LOG_WARNING("BluetoothLEDevice::FromBluetoothAddressAsync returned null for address %llu "
+                                            "after %lld ms (device was not available in the Windows Bluetooth cache)",
+                                            address, elapsedMs);
+                            candidateClaimed.store(false, std::memory_order_release);
+                            cv.notify_one();
                             return;
                         }
 
-                        APP_LOG_INFO("BluetoothLEDevice created (address: %llu, status: %s)",
-                                     address, BluetoothLog::ConnectionStatusName(dev.ConnectionStatus()));
+                        auto createElapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::steady_clock::now() - createStarted).count();
+                        std::string deviceName = winrt::to_string(dev.Name());
+                        const char* windowsPairingState = "unknown";
+                        try {
+                            windowsPairingState = dev.DeviceInformation().Pairing().IsPaired()
+                                ? "paired" : "not paired";
+                        } catch (const winrt::hresult_error& e) {
+                            APP_LOG_DEBUG("Could not read Windows pairing state for address %llu: %s",
+                                          address, BluetoothLog::DescribeHResultError(e).c_str());
+                        } catch (...) {
+                            APP_LOG_DEBUG("Could not read Windows pairing state for address %llu: unknown exception",
+                                          address);
+                        }
+
+                        APP_LOG_INFO("BluetoothLEDevice created (address: %llu, name: \"%s\", address_type: %s, "
+                                     "cached_connection_status: %s, Windows_pairing_state: %s, elapsed: %lld ms)",
+                                     address, deviceName.c_str(),
+                                     BluetoothLog::AddressTypeName(dev.BluetoothAddressType()),
+                                     BluetoothLog::ConnectionStatusName(dev.ConnectionStatus()),
+                                     windowsPairingState, createElapsedMs);
 
                         {
                             std::lock_guard<std::mutex> lock(mtx);
                             device = dev;
                         }
+                        deviceReady.store(true, std::memory_order_release);
                         cv.notify_one();
                         return;
                     }
+
+                    APP_LOG_DEBUG("Nintendo manufacturer advertisement did not match Joy-Con prefix "
+                                  "(address: %llu, manufacturer_data: %s)",
+                                  address, manufacturerData.c_str());
                 }
             } catch (const winrt::hresult_error& e) {
                 APP_LOG_ERROR("BLE advertisement callback failed: %s",
                               BluetoothLog::DescribeHResultError(e).c_str());
-                connected.store(false, std::memory_order_release);
+                candidateClaimed.store(false, std::memory_order_release);
+                cv.notify_one();
             } catch (...) {
                 APP_LOG_ERROR("BLE advertisement callback failed with an unknown exception");
-                connected.store(false, std::memory_order_release);
+                candidateClaimed.store(false, std::memory_order_release);
+                cv.notify_one();
             }
         });
 
@@ -205,19 +285,49 @@ private:
             return;
         }
 
+        bool scanTimedOut = false;
         {
             std::unique_lock<std::mutex> lock(mtx);
-            if (!cv.wait_for(lock, std::chrono::seconds(30), [&]() { 
-                return connected.load(std::memory_order_acquire) ||
-                       cancelScan.load() ||
-                       watcherFailed.load(std::memory_order_acquire);
-            })) {
-                watcher.Stop();
-                APP_LOG_WARNING("BLE scan timed out after 30 seconds");
-                state.store(ScanState::Timeout);
-                if (scanCallback) scanCallback(ConnectedJoyCon{}, ScanState::Timeout);
-                return;
+            auto scanDeadline = scanStarted + std::chrono::seconds(30);
+            while (!deviceReady.load(std::memory_order_acquire)) {
+                if (candidateClaimed.load(std::memory_order_acquire)) {
+                    // FromBluetoothAddressAsync cannot be cancelled. Keep this context alive
+                    // until the in-flight callback completes instead of timing out underneath it.
+                    cv.wait(lock, [&]() {
+                        return deviceReady.load(std::memory_order_acquire) ||
+                               !candidateClaimed.load(std::memory_order_acquire);
+                    });
+                    continue;
+                }
+
+                if (cancelScan.load() || watcherFailed.load(std::memory_order_acquire)) {
+                    break;
+                }
+
+                if (!cv.wait_until(lock, scanDeadline, [&]() {
+                    return deviceReady.load(std::memory_order_acquire) ||
+                           candidateClaimed.load(std::memory_order_acquire) ||
+                           cancelScan.load() ||
+                           watcherFailed.load(std::memory_order_acquire);
+                })) {
+                    scanTimedOut = true;
+                    break;
+                }
             }
+        }
+
+        if (scanTimedOut) {
+            watcher.Stop();
+            APP_LOG_WARNING("BLE scan timed out after 30 seconds (advertisements_received: %u, "
+                            "Nintendo_manufacturer_sections: %u, matching_Joy-Con_advertisements: %u)",
+                            advertisementsReceived.load(std::memory_order_relaxed),
+                            nintendoAdvertisementsReceived.load(std::memory_order_relaxed),
+                            matchingAdvertisementsReceived.load(std::memory_order_relaxed));
+            APP_LOG_WARNING("No GATT connection was attempted. The controller may be powered off, out of range, "
+                            "not advertising the expected controller payload, or the Bluetooth radio/driver may not be receiving advertisements");
+            state.store(ScanState::Timeout);
+            if (scanCallback) scanCallback(ConnectedJoyCon{}, ScanState::Timeout);
+            return;
         }
 
         if (watcherFailed.load(std::memory_order_acquire)) {
@@ -239,9 +349,12 @@ private:
         cj.device = device;
         cj.bleAddress = device.BluetoothAddress();
 
-        device.ConnectionStatusChanged([bleAddress = cj.bleAddress](BluetoothLEDevice const& sender, IInspectable const&) {
-            APP_LOG_INFO("BLE device %llu connection status changed: %s",
-                         bleAddress, BluetoothLog::ConnectionStatusName(sender.ConnectionStatus()));
+        auto handshakeStarted = std::chrono::steady_clock::now();
+        device.ConnectionStatusChanged([bleAddress = cj.bleAddress, handshakeStarted](BluetoothLEDevice const& sender, IInspectable const&) {
+            auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - handshakeStarted).count();
+            APP_LOG_INFO("BLE device %llu connection status changed after %lld ms: %s",
+                         bleAddress, elapsedMs, BluetoothLog::ConnectionStatusName(sender.ConnectionStatus()));
         });
 
         // Check cancel before GATT discovery
@@ -251,18 +364,30 @@ private:
         }
 
         // Discover GATT services
-        APP_LOG_DEBUG("Discovering GATT services for address %llu", cj.bleAddress);
+        APP_LOG_DEBUG("Discovering GATT services for address %llu (first GATT operation; Windows may initiate or validate the BLE link)",
+                      cj.bleAddress);
         GattDeviceServicesResult servicesResult = nullptr;
+        auto discoveryStarted = std::chrono::steady_clock::now();
         try {
             servicesResult = device.GetGattServicesAsync().get();
         } catch (const winrt::hresult_error& e) {
-            APP_LOG_ERROR("GetGattServicesAsync threw for address %llu: %s",
-                          cj.bleAddress, BluetoothLog::DescribeHResultError(e).c_str());
+            auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - discoveryStarted).count();
+            APP_LOG_ERROR("GetGattServicesAsync threw for address %llu after %lld ms "
+                          "(connection_status: %s): %s",
+                          cj.bleAddress, elapsedMs,
+                          BluetoothLog::ConnectionStatusName(device.ConnectionStatus()),
+                          BluetoothLog::DescribeHResultError(e).c_str());
             state.store(ScanState::Error);
             if (scanCallback) scanCallback(ConnectedJoyCon{}, ScanState::Error);
             return;
         } catch (...) {
-            APP_LOG_ERROR("GetGattServicesAsync threw an unknown exception for address %llu", cj.bleAddress);
+            auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - discoveryStarted).count();
+            APP_LOG_ERROR("GetGattServicesAsync threw an unknown exception for address %llu after %lld ms "
+                          "(connection_status: %s)",
+                          cj.bleAddress, elapsedMs,
+                          BluetoothLog::ConnectionStatusName(device.ConnectionStatus()));
             state.store(ScanState::Error);
             if (scanCallback) scanCallback(ConnectedJoyCon{}, ScanState::Error);
             return;
@@ -273,16 +398,28 @@ private:
             return;
         }
         if (servicesResult.Status() != GattCommunicationStatus::Success) {
-            APP_LOG_ERROR("GATT service discovery failed for address %llu: %s",
-                          cj.bleAddress,
+            auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - discoveryStarted).count();
+            APP_LOG_ERROR("GATT service discovery failed for address %llu after %lld ms "
+                          "(connection_status: %s): %s",
+                          cj.bleAddress, elapsedMs,
+                          BluetoothLog::ConnectionStatusName(device.ConnectionStatus()),
                           BluetoothLog::DescribeGattStatus(servicesResult.Status(),
-                                                           servicesResult.ProtocolError()).c_str());
+                                                            servicesResult.ProtocolError()).c_str());
+            if (servicesResult.Status() == GattCommunicationStatus::Unreachable) {
+                APP_LOG_WARNING("Connection diagnosis: a matching Joy-Con advertisement was received, but the GATT handshake "
+                                "did not complete. WinRT does not expose whether the controller's sync button is held; "
+                                "Unreachable is consistent with the controller not being in pairing mode, but can also mean "
+                                "power/range loss, controller cooldown, or a transient Bluetooth link/driver failure");
+            }
             state.store(ScanState::Error);
             if (scanCallback) scanCallback(ConnectedJoyCon{}, ScanState::Error);
             return;
         }
-        APP_LOG_DEBUG("GATT service discovery succeeded for address %llu (%u service(s))",
-                      cj.bleAddress, servicesResult.Services().Size());
+        auto discoveryElapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - discoveryStarted).count();
+        APP_LOG_DEBUG("GATT service discovery succeeded for address %llu in %lld ms (%u service(s))",
+                      cj.bleAddress, discoveryElapsedMs, servicesResult.Services().Size());
 
         for (auto service : servicesResult.Services()) {
             if (cancelScan.load()) {

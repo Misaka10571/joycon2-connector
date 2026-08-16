@@ -926,7 +926,8 @@ inline void RenderAddDevice(int& activePage) {
                 g_wizard.statusMessage.clear();
 
                 DeviceManager::Instance().StartScan([](ConnectedJoyCon cj, ScanState state) {
-                    APP_LOG_DEBUG("Add Device wizard scan callback: state=%d", static_cast<int>(state));
+                    APP_LOG_DEBUG("Add Device wizard scan callback: state=%s (%d)",
+                                  ScanStateName(state), static_cast<int>(state));
                     if (state == ScanState::Found) {
                         auto& wiz = g_wizard;
                         bool ok = false;
@@ -1024,7 +1025,8 @@ inline void RenderAddDevice(int& activePage) {
                 g_wizard.statusMessage.clear();
 
                 DeviceManager::Instance().StartScan([&activePage](ConnectedJoyCon cj, ScanState state) {
-                    APP_LOG_DEBUG("Add Device left Joy-Con scan callback: state=%d", static_cast<int>(state));
+                    APP_LOG_DEBUG("Add Device left Joy-Con scan callback: state=%s (%d)",
+                                  ScanStateName(state), static_cast<int>(state));
                     if (state == ScanState::Found) {
                         bool ok = PlayerManager::Instance().AddDualJoyConSecondStep(cj);
                         g_wizard.statusMessage = ok ? "OK" : "FAIL";
@@ -1032,6 +1034,9 @@ inline void RenderAddDevice(int& activePage) {
                     } else if (state == ScanState::Timeout) {
                         g_wizard.statusMessage = "TIMEOUT";
                         APP_LOG_WARNING("Left Joy-Con scan timeout");
+                    } else if (state == ScanState::Error) {
+                        g_wizard.statusMessage = "ERROR";
+                        APP_LOG_ERROR("Left Joy-Con scan error");
                     }
                 });
             }
@@ -1052,8 +1057,12 @@ inline void RenderAddDevice(int& activePage) {
                     g_wizard.Reset();
                     activePage = 0;
                 }
-            } else {
+            } else if (g_wizard.statusMessage == "TIMEOUT") {
                 ImGui::TextColored(UITheme::Error, "%s", T("add_timeout"));
+                ImGui::Spacing();
+                if (SecondaryButton(T("add_back"))) g_wizard.scanStarted = false;
+            } else {
+                ImGui::TextColored(UITheme::Error, "Error connecting.");
                 ImGui::Spacing();
                 if (SecondaryButton(T("add_back"))) g_wizard.scanStarted = false;
             }
