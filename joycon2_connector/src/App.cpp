@@ -573,6 +573,7 @@ void LoadFonts(ImGuiIO& io, float dpiScale) {
         0x0020, 0x00FF, // Basic Latin
         0x2000, 0x206F, // General Punctuation
         0x2190, 0x21FF, // Arrows (contains ⇄ U+21C4)
+        0x2460, 0x24FF, // Enclosed alphanumerics (contains ⓘ U+24D8)
         0x3000, 0x30FF, // CJK Symbols, Hiragana, Katakana
         0x31F0, 0x31FF, // Katakana Extension
         0x4E00, 0x9FFF, // CJK Unified Ideographs
@@ -587,6 +588,7 @@ void LoadFonts(ImGuiIO& io, float dpiScale) {
         0x0020, 0x00FF, // Basic Latin
         0x2000, 0x206F, // General Punctuation
         0x2190, 0x21FF, // Arrows (contains ⇄ U+21C4)
+        0x2460, 0x24FF, // Enclosed alphanumerics
         0x2600, 0x26FF, // Miscellaneous Symbols (contains ⚙ U+2699)
         0x2700, 0x27BF, // Dingbats
         0xFE00, 0xFE0F, // Variation Selectors
@@ -595,6 +597,7 @@ void LoadFonts(ImGuiIO& io, float dpiScale) {
     // Symbol ranges for Segoe UI Symbol fallback (⚙ ⇄ etc.)
     static const ImWchar symbolRanges[] = {
         0x2190, 0x21FF, // Arrows
+        0x2460, 0x24FF, // Enclosed alphanumerics
         0x2600, 0x26FF, // Miscellaneous Symbols
         0x2700, 0x27BF, // Dingbats
         0,
