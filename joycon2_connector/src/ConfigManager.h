@@ -50,7 +50,6 @@ struct VibrationConfig {
 // Per-device settings (keyed by BLE address)
 struct DeviceSettings {
     bool swapABXY = false;  // Swap A⇄B / X⇄Y button positions
-    bool useRawVibration = true;  // true = raw motor control (0x5N), false = predefined samples (0x0A)
     bool useXboxEmulation = false;  // true = emulate Xbox 360 controller instead of DS4
 };
 
@@ -163,7 +162,6 @@ inline std::string ConfigToJSON(const AppConfig& config) {
     size_t dsIdx = 0;
     for (const auto& [addr, ds] : config.deviceSettings) {
         oss << "    { \"addr\": \"" << addr << "\", \"swapABXY\": " << (ds.swapABXY ? "true" : "false")
-            << ", \"useRawVibration\": " << (ds.useRawVibration ? "true" : "false")
             << ", \"useXboxEmulation\": " << (ds.useXboxEmulation ? "true" : "false") << " }";
         if (dsIdx + 1 < config.deviceSettings.size()) oss << ",";
         oss << "\n";
@@ -310,7 +308,6 @@ inline bool JSONToConfig(const std::string& json, AppConfig& config) {
                         uint64_t addr = std::stoull(addrStr);
                         DeviceSettings ds;
                         ds.swapABXY = ExtractJsonBool(dsObjStr, "swapABXY", false);
-                        ds.useRawVibration = ExtractJsonBool(dsObjStr, "useRawVibration", true);
                         ds.useXboxEmulation = ExtractJsonBool(dsObjStr, "useXboxEmulation", false);
                         config.deviceSettings[addr] = ds;
                     } catch (...) {}

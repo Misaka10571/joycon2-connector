@@ -14,27 +14,143 @@
 #include <mutex>
 #include <condition_variable>
 #include <string>
+#include <algorithm>
 #include <Windows.h>
 
 // Vibration callback context passed to ViGEm as UserData
 struct VibrationContext {
-    GattCharacteristic writeChar{ nullptr };
-    GattCharacteristic writeCharLeft{ nullptr };   // for dual joycon
-    GattCharacteristic writeCharRight{ nullptr };  // for dual joycon
+    GattCharacteristic vibrationChar{ nullptr };
+    GattCharacteristic vibrationCharLeft{ nullptr };   // for dual joycon
+    GattCharacteristic vibrationCharRight{ nullptr };  // for dual joycon
+    VibrationReportKind reportKind = VibrationReportKind::DualMotor;
     bool isDual = false;
-    std::chrono::steady_clock::time_point lastSendTime{};
-    uint8_t lastMotorL = 0;       // track to avoid redundant sends
-    uint8_t lastMotorR = 0;       // track to avoid redundant sends
-    uint8_t lastSample = 0xFF;    // track for sample-mode dedup
-    uint8_t sequenceCounter = 0;  // raw vibration frame sequence (lower 4 bits used)
-    std::shared_ptr<std::atomic<bool>> useRawVibration; // per-device vibration mode toggle
-    static constexpr int MIN_INTERVAL_MS = 50;     // throttle BLE writes
+    std::atomic<uint8_t> largeMotor{ 0 };
+    std::atomic<uint8_t> smallMotor{ 0 };
+    std::atomic<bool> workerRunning{ false };
+    std::thread workerThread;
+    std::mutex workerMutex;
+    std::condition_variable workerCV;
+    uint8_t sequenceCounter = 0;  // report sequence (lower 4 bits used by HD rumble slots)
+    static constexpr int REFRESH_INTERVAL_MS = 12;
 };
 
 struct InputCallbackGate {
     std::mutex mutex;
     bool active = true;
 };
+
+inline void SendVibrationFrame(VibrationContext& ctx, uint8_t largeMotor, uint8_t smallMotor) {
+    uint8_t sequence = ctx.sequenceCounter++;
+    if (ctx.isDual) {
+        if (ctx.vibrationCharLeft)
+            SendVibrationReport(ctx.vibrationCharLeft, VibrationReportKind::SingleMotor,
+                largeMotor, smallMotor, sequence);
+        if (ctx.vibrationCharRight)
+            SendVibrationReport(ctx.vibrationCharRight, VibrationReportKind::SingleMotor,
+                largeMotor, smallMotor, sequence);
+    } else if (ctx.vibrationChar) {
+        SendVibrationReport(ctx.vibrationChar, ctx.reportKind, largeMotor, smallMotor, sequence);
+    }
+}
+
+inline bool StartVibrationWorker(VibrationContext& ctx) {
+    bool hasOutput = ctx.isDual
+        ? static_cast<bool>(ctx.vibrationCharLeft) || static_cast<bool>(ctx.vibrationCharRight)
+        : static_cast<bool>(ctx.vibrationChar);
+    if (!hasOutput) return false;
+    if (ctx.workerRunning.exchange(true, std::memory_order_acq_rel)) return true;
+
+    try {
+        ctx.workerThread = std::thread([&ctx]() {
+        bool outputActive = false;
+        uint16_t gcAccumulator = 0;
+
+        while (ctx.workerRunning.load(std::memory_order_acquire)) {
+            uint8_t largeMotor = ctx.largeMotor.load(std::memory_order_relaxed);
+            uint8_t smallMotor = ctx.smallMotor.load(std::memory_order_relaxed);
+            bool requestedActive = largeMotor != 0 || smallMotor != 0;
+
+            if (requestedActive) {
+                if (ctx.reportKind == VibrationReportKind::GameCube && !ctx.isDual) {
+                    uint8_t magnitude = (std::max)(largeMotor, static_cast<uint8_t>(smallMotor / 2));
+                    gcAccumulator = static_cast<uint16_t>(gcAccumulator + magnitude);
+                    bool pulseOn = gcAccumulator >= 255;
+                    if (pulseOn) gcAccumulator = static_cast<uint16_t>(gcAccumulator - 255);
+                    SendGameCubeVibrationReport(ctx.vibrationChar,
+                        pulseOn ? GameCubeRumbleState::On : GameCubeRumbleState::Off,
+                        ctx.sequenceCounter++);
+                } else {
+                    SendVibrationFrame(ctx, largeMotor, smallMotor);
+                }
+                outputActive = true;
+
+                std::unique_lock<std::mutex> lock(ctx.workerMutex);
+                ctx.workerCV.wait_for(lock,
+                    std::chrono::milliseconds(VibrationContext::REFRESH_INTERVAL_MS),
+                    [&ctx, largeMotor, smallMotor]() {
+                        return !ctx.workerRunning.load(std::memory_order_acquire) ||
+                            ctx.largeMotor.load(std::memory_order_relaxed) != largeMotor ||
+                            ctx.smallMotor.load(std::memory_order_relaxed) != smallMotor;
+                    });
+                continue;
+            }
+
+            if (outputActive) {
+                if (ctx.reportKind == VibrationReportKind::GameCube && !ctx.isDual) {
+                    SendGameCubeVibrationReport(ctx.vibrationChar, GameCubeRumbleState::Stop,
+                        ctx.sequenceCounter++);
+                    gcAccumulator = 0;
+                } else {
+                    SendVibrationFrame(ctx, 0, 0);
+                }
+                outputActive = false;
+            }
+
+            std::unique_lock<std::mutex> lock(ctx.workerMutex);
+            ctx.workerCV.wait(lock, [&ctx]() {
+                return !ctx.workerRunning.load(std::memory_order_acquire) ||
+                    ctx.largeMotor.load(std::memory_order_relaxed) != 0 ||
+                    ctx.smallMotor.load(std::memory_order_relaxed) != 0;
+            });
+        }
+
+        if (outputActive) {
+            if (ctx.reportKind == VibrationReportKind::GameCube && !ctx.isDual) {
+                SendGameCubeVibrationReport(ctx.vibrationChar, GameCubeRumbleState::Stop,
+                    ctx.sequenceCounter++);
+            } else {
+                SendVibrationFrame(ctx, 0, 0);
+            }
+        }
+        });
+    } catch (...) {
+        ctx.workerRunning.store(false, std::memory_order_release);
+        APP_LOG_ERROR("Failed to start vibration output worker");
+        return false;
+    }
+    return true;
+}
+
+inline void StopVibrationWorker(VibrationContext& ctx) {
+    ctx.largeMotor.store(0, std::memory_order_relaxed);
+    ctx.smallMotor.store(0, std::memory_order_relaxed);
+    ctx.workerRunning.store(false, std::memory_order_release);
+    ctx.workerCV.notify_one();
+    if (ctx.workerThread.joinable()) ctx.workerThread.join();
+}
+
+inline void HandleVibrationOutput(VibrationContext* ctx, UCHAR LargeMotor, UCHAR SmallMotor) {
+    if (!ctx) return;
+
+    auto& vibConfig = ConfigManager::Instance().config.vibrationConfig;
+    float scaledLarge = vibConfig.enabled ? LargeMotor * vibConfig.intensity : 0.0f;
+    float scaledSmall = vibConfig.enabled ? SmallMotor * vibConfig.intensity : 0.0f;
+    ctx->largeMotor.store(static_cast<uint8_t>((std::min)(scaledLarge, 255.0f)),
+        std::memory_order_relaxed);
+    ctx->smallMotor.store(static_cast<uint8_t>((std::min)(scaledSmall, 255.0f)),
+        std::memory_order_relaxed);
+    ctx->workerCV.notify_one();
+}
 
 // ViGEm DS4 vibration notification callback (runs on ViGEm worker thread)
 inline VOID CALLBACK DS4VibrationCallback(
@@ -45,83 +161,7 @@ inline VOID CALLBACK DS4VibrationCallback(
     DS4_LIGHTBAR_COLOR /*LightbarColor*/,
     LPVOID UserData)
 {
-    auto* ctx = static_cast<VibrationContext*>(UserData);
-    if (!ctx) return;
-
-    auto& vibConfig = ConfigManager::Instance().config.vibrationConfig;
-    if (!vibConfig.enabled) return;
-
-    // Throttle: skip if too soon since last send
-    auto now = std::chrono::steady_clock::now();
-    auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - ctx->lastSendTime).count();
-    if (elapsed < VibrationContext::MIN_INTERVAL_MS) return;
-
-    // Apply intensity scaling
-    float scaledLarge = LargeMotor * vibConfig.intensity;
-    float scaledSmall = SmallMotor * vibConfig.intensity;
-    uint8_t motorL = static_cast<uint8_t>((std::min)(scaledLarge, 255.0f));
-    uint8_t motorR = static_cast<uint8_t>((std::min)(scaledSmall, 255.0f));
-
-    // Determine vibration mode: raw motor control (0x5N) vs predefined samples (0x0A)
-    bool rawMode = ctx->useRawVibration && ctx->useRawVibration->load(std::memory_order_relaxed);
-
-    if (rawMode) {
-        // --- Raw vibration mode (0x5N protocol) ---
-        // Directly controls vibration motors, no audible beep on Pro2.
-        if (motorL == ctx->lastMotorL && motorR == ctx->lastMotorR) return;
-        ctx->lastMotorL = motorL;
-        ctx->lastMotorR = motorR;
-        ctx->lastSendTime = now;
-
-        bool vibEnabled = (motorL > 0 || motorR > 0);
-        uint8_t seq = ctx->sequenceCounter++;
-
-        if (ctx->isDual) {
-            uint8_t leftData[12], rightData[12];
-            EncodeVibrationPayload(motorL, 0, leftData);
-            EncodeVibrationPayload(0, motorR, rightData);
-            if (ctx->writeCharLeft)
-                SendRawVibrationAsync(ctx->writeCharLeft, motorL > 0, leftData, seq);
-            if (ctx->writeCharRight)
-                SendRawVibrationAsync(ctx->writeCharRight, motorR > 0, rightData, seq);
-        } else {
-            uint8_t vibData[12];
-            EncodeVibrationPayload(motorL, motorR, vibData);
-            if (ctx->writeChar)
-                SendRawVibrationAsync(ctx->writeChar, vibEnabled, vibData, seq);
-        }
-    } else {
-        // --- Predefined sample mode (0x0A command) ---
-        // Uses firmware sound/haptic samples. May cause audible beep on some controllers.
-        uint8_t sample;
-        if (motorL == 0 && motorR == 0) {
-            sample = VIB_NONE;
-        } else if (motorL > 180 || motorR > 180) {
-            sample = VIB_BUZZ;
-        } else if (motorL > 80 || motorR > 80) {
-            sample = VIB_STRONG_THUNK;
-        } else {
-            sample = VIB_NONE;  // Suppress weak vibration — VIB_DUN triggers buzzer/speaker
-        }
-
-        if (sample == ctx->lastSample && sample != VIB_NONE) return;
-        ctx->lastSample = sample;
-        ctx->lastSendTime = now;
-
-        if (ctx->isDual) {
-            if (ctx->writeCharLeft && motorL > 0)
-                SendVibrationSampleAsync(ctx->writeCharLeft, sample);
-            if (ctx->writeCharRight && motorR > 0)
-                SendVibrationSampleAsync(ctx->writeCharRight, sample);
-            if (motorL == 0 && motorR == 0) {
-                if (ctx->writeCharLeft)  SendVibrationSampleAsync(ctx->writeCharLeft, VIB_NONE);
-                if (ctx->writeCharRight) SendVibrationSampleAsync(ctx->writeCharRight, VIB_NONE);
-            }
-        } else {
-            if (ctx->writeChar)
-                SendVibrationSampleAsync(ctx->writeChar, sample);
-        }
-    }
+    HandleVibrationOutput(static_cast<VibrationContext*>(UserData), LargeMotor, SmallMotor);
 }
 
 // ViGEm Xbox 360 vibration notification callback (runs on ViGEm worker thread)
@@ -133,71 +173,7 @@ inline VOID CALLBACK X360VibrationCallback(
     UCHAR /*LedNumber*/,
     LPVOID UserData)
 {
-    auto* ctx = static_cast<VibrationContext*>(UserData);
-    if (!ctx) return;
-
-    auto& vibConfig = ConfigManager::Instance().config.vibrationConfig;
-    if (!vibConfig.enabled) return;
-
-    auto now = std::chrono::steady_clock::now();
-    auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - ctx->lastSendTime).count();
-    if (elapsed < VibrationContext::MIN_INTERVAL_MS) return;
-
-    float scaledLarge = LargeMotor * vibConfig.intensity;
-    float scaledSmall = SmallMotor * vibConfig.intensity;
-    uint8_t motorL = static_cast<uint8_t>((std::min)(scaledLarge, 255.0f));
-    uint8_t motorR = static_cast<uint8_t>((std::min)(scaledSmall, 255.0f));
-
-    bool rawMode = ctx->useRawVibration && ctx->useRawVibration->load(std::memory_order_relaxed);
-
-    if (rawMode) {
-        if (motorL == ctx->lastMotorL && motorR == ctx->lastMotorR) return;
-        ctx->lastMotorL = motorL;
-        ctx->lastMotorR = motorR;
-        ctx->lastSendTime = now;
-
-        bool vibEnabled = (motorL > 0 || motorR > 0);
-        uint8_t seq = ctx->sequenceCounter++;
-
-        if (ctx->isDual) {
-            uint8_t leftData[12], rightData[12];
-            EncodeVibrationPayload(motorL, 0, leftData);
-            EncodeVibrationPayload(0, motorR, rightData);
-            if (ctx->writeCharLeft)
-                SendRawVibrationAsync(ctx->writeCharLeft, motorL > 0, leftData, seq);
-            if (ctx->writeCharRight)
-                SendRawVibrationAsync(ctx->writeCharRight, motorR > 0, rightData, seq);
-        } else {
-            uint8_t vibData[12];
-            EncodeVibrationPayload(motorL, motorR, vibData);
-            if (ctx->writeChar)
-                SendRawVibrationAsync(ctx->writeChar, vibEnabled, vibData, seq);
-        }
-    } else {
-        uint8_t sample;
-        if (motorL == 0 && motorR == 0) sample = VIB_NONE;
-        else if (motorL > 180 || motorR > 180) sample = VIB_BUZZ;
-        else if (motorL > 80 || motorR > 80) sample = VIB_STRONG_THUNK;
-        else sample = VIB_NONE;  // Suppress weak vibration — VIB_DUN triggers buzzer/speaker
-
-        if (sample == ctx->lastSample && sample != VIB_NONE) return;
-        ctx->lastSample = sample;
-        ctx->lastSendTime = now;
-
-        if (ctx->isDual) {
-            if (ctx->writeCharLeft && motorL > 0)
-                SendVibrationSampleAsync(ctx->writeCharLeft, sample);
-            if (ctx->writeCharRight && motorR > 0)
-                SendVibrationSampleAsync(ctx->writeCharRight, sample);
-            if (motorL == 0 && motorR == 0) {
-                if (ctx->writeCharLeft)  SendVibrationSampleAsync(ctx->writeCharLeft, VIB_NONE);
-                if (ctx->writeCharRight) SendVibrationSampleAsync(ctx->writeCharRight, VIB_NONE);
-            }
-        } else {
-            if (ctx->writeChar)
-                SendVibrationSampleAsync(ctx->writeChar, sample);
-        }
-    }
+    HandleVibrationOutput(static_cast<VibrationContext*>(UserData), LargeMotor, SmallMotor);
 }
 
 enum class ControllerType {
@@ -326,7 +302,6 @@ struct ProControllerPlayer {
     std::unique_ptr<VibrationContext> vibCtx;
     // Per-device settings
     std::shared_ptr<std::atomic<bool>> swapABXYFlag = std::make_shared<std::atomic<bool>>(false);
-    std::shared_ptr<std::atomic<bool>> useRawVibrationFlag = std::make_shared<std::atomic<bool>>(true);
     std::shared_ptr<std::atomic<bool>> isXboxModeFlag = std::make_shared<std::atomic<bool>>(false);
     uint64_t bleAddress = 0;
     winrt::event_token inputChangedToken{};
@@ -456,7 +431,7 @@ inline void HandleSpecialProButtons(const std::vector<uint8_t>& buffer) {
     for (int i = 3; i <= 8; ++i) state = (state << 8) | buffer[i];
 
     // Screenshot -> F12
-    constexpr uint64_t BUTTON_SCREENSHOT_MASK = 0x000000000400;
+    constexpr uint64_t BUTTON_SCREENSHOT_MASK = 0x000020000000;
     bool screenshotPressed = (state & BUTTON_SCREENSHOT_MASK) != 0;
     if (screenshotPressed && !g_screenshotButtonPressed) SendKeyboardInput(VK_F12, true);
     else if (!screenshotPressed && g_screenshotButtonPressed) SendKeyboardInput(VK_F12, false);
@@ -472,7 +447,7 @@ inline void HandleSpecialProButtons(const std::vector<uint8_t>& buffer) {
     g_comboPressed = comboActive;
 
     // C button -> cycle layout
-    constexpr uint64_t BUTTON_C_MASK = 0x000000000800;
+    constexpr uint64_t BUTTON_C_MASK = 0x000040000000;
     bool cPressed = (state & BUTTON_C_MASK) != 0;
     if (cPressed && !g_cButtonPressed) {
         auto& config = ConfigManager::Instance().config.proConfig;
@@ -519,7 +494,7 @@ public:
         }
         if (!cj.writeChar) {
             APP_LOG_WARNING("Single Joy-Con has no write-command characteristic (address: %llu); "
-                            "LED/vibration/command features will be unavailable",
+                            "LED and command features will be unavailable",
                             cj.bleAddress);
         }
 
@@ -551,16 +526,10 @@ public:
         player.isXboxMode = xboxMode;
         auto& mouseConfig = ConfigManager::Instance().config.mouseConfig;
 
-        // Register vibration callback
+        // Keep the callback context heap allocated for the lifetime of the ViGEm target.
         player.vibCtx = std::make_unique<VibrationContext>();
-        player.vibCtx->writeChar = cj.writeChar;
-        if (xboxMode) {
-            vigem_target_x360_register_notification(
-                vigem.GetClient(), target, X360VibrationCallback, player.vibCtx.get());
-        } else {
-            vigem_target_ds4_register_notification(
-                vigem.GetClient(), target, DS4VibrationCallback, player.vibCtx.get());
-        }
+        player.vibCtx->vibrationChar = cj.vibrationChar;
+        player.vibCtx->reportKind = VibrationReportKind::SingleMotor;
 
         try {
             player.inputChangedToken = player.joycon.inputChar.ValueChanged(
@@ -820,8 +789,17 @@ public:
                                         : std::move(subscribeDetail));
         }
 
+        StartVibrationWorker(*player.vibCtx);
+        if (xboxMode) {
+            vigem_target_x360_register_notification(
+                vigem.GetClient(), target, X360VibrationCallback, player.vibCtx.get());
+        } else {
+            vigem_target_ds4_register_notification(
+                vigem.GetClient(), target, DS4VibrationCallback, player.vibCtx.get());
+        }
+
         if (player.joycon.writeChar) {
-            SendCustomCommands(player.joycon.writeChar);
+            SendCustomCommands(player.joycon.writeChar, 0x37, true);
             std::this_thread::sleep_for(std::chrono::milliseconds(200));
             SetPlayerLEDs(player.joycon.writeChar, static_cast<uint8_t>(1 << GetPlayerCount()));
             EmitSound(player.joycon.writeChar);
@@ -839,6 +817,7 @@ public:
                     vigem_target_x360_unregister_notification(target);
                 else
                     vigem_target_ds4_unregister_notification(target);
+                StopVibrationWorker(*player.vibCtx);
                 vigem.RemoveTarget(target);
                 APP_LOG_ERROR("Failed to store single Joy-Con player (address: %llu)", cj.bleAddress);
                 return ReportConnectionError(error, ConnectionErrorKind::Internal,
@@ -879,14 +858,14 @@ public:
         }
         if (!rightJoyCon.writeChar) {
             APP_LOG_WARNING("Right Joy-Con has no write-command characteristic (address: %llu); "
-                            "LED/vibration/command features will be unavailable",
+                            "LED and command features will be unavailable",
                             rightJoyCon.bleAddress);
         }
 
         pendingDualRight = rightJoyCon;
         pendingDualGyro = gyroSource;
         if (rightJoyCon.writeChar) {
-            SendCustomCommands(rightJoyCon.writeChar);
+            SendCustomCommands(rightJoyCon.writeChar, 0x37, true);
             std::this_thread::sleep_for(std::chrono::milliseconds(200));
             SetPlayerLEDs(rightJoyCon.writeChar, 0x01);
             EmitSound(rightJoyCon.writeChar);
@@ -917,7 +896,7 @@ public:
                 ConnectionErrorStage::RegisterInput);
         }
         if (leftJoyCon.writeChar) {
-            SendCustomCommands(leftJoyCon.writeChar);
+            SendCustomCommands(leftJoyCon.writeChar, 0x37, true);
             std::this_thread::sleep_for(std::chrono::milliseconds(200));
             SetPlayerLEDs(leftJoyCon.writeChar, 0x08);
             EmitSound(leftJoyCon.writeChar);
@@ -954,18 +933,12 @@ public:
         dp->isXboxMode = xboxMode;
         dp->running.store(true);
 
-        // Register vibration callback for dual JoyCon
+        // Keep the callback context stable while both controller objects are active.
         dp->vibCtx = std::make_unique<VibrationContext>();
         dp->vibCtx->isDual = true;
-        dp->vibCtx->writeCharLeft = leftJoyCon.writeChar;
-        dp->vibCtx->writeCharRight = pendingDualRight.writeChar;
-        if (xboxMode) {
-            vigem_target_x360_register_notification(
-                vigem.GetClient(), target, X360VibrationCallback, dp->vibCtx.get());
-        } else {
-            vigem_target_ds4_register_notification(
-                vigem.GetClient(), target, DS4VibrationCallback, dp->vibCtx.get());
-        }
+        dp->vibCtx->reportKind = VibrationReportKind::SingleMotor;
+        dp->vibCtx->vibrationCharLeft = leftJoyCon.vibrationChar;
+        dp->vibCtx->vibrationCharRight = pendingDualRight.vibrationChar;
 
         try {
             dp->leftInputChangedToken = dp->leftJoyCon.inputChar.ValueChanged(
@@ -1126,6 +1099,15 @@ public:
                 ConnectionErrorStage::StartWorker);
         }
 
+        StartVibrationWorker(*dp->vibCtx);
+        if (xboxMode) {
+            vigem_target_x360_register_notification(
+                vigem.GetClient(), target, X360VibrationCallback, dp->vibCtx.get());
+        } else {
+            vigem_target_ds4_register_notification(
+                vigem.GetClient(), target, DS4VibrationCallback, dp->vibCtx.get());
+        }
+
         try {
             dualPlayers.push_back(std::move(dp));
         } catch (...) {
@@ -1159,7 +1141,7 @@ public:
         }
         if (!controller.writeChar) {
             APP_LOG_WARNING("Pro/NSO-GC controller has no write-command characteristic (address: %llu); "
-                            "LED/vibration/command features will be unavailable",
+                            "LED and command features will be unavailable",
                             controller.bleAddress);
         }
 
@@ -1192,8 +1174,6 @@ public:
         // Create shared flags so BLE callback lambda can access them safely
         auto swapFlag = std::make_shared<std::atomic<bool>>(
             ConfigManager::Instance().GetDeviceSettings(controller.bleAddress).swapABXY);
-        auto rawVibFlag = std::make_shared<std::atomic<bool>>(
-            ConfigManager::Instance().GetDeviceSettings(controller.bleAddress).useRawVibration);
         auto xboxModeFlag = std::make_shared<std::atomic<bool>>(xboxMode);
         auto inputCallbackGate = std::make_shared<InputCallbackGate>();
         winrt::event_token inputChangedToken{};
@@ -1311,14 +1291,15 @@ public:
         }
 
         if (controller.writeChar) {
-            SendCustomCommands(controller.writeChar);
+            uint8_t featureFlags = (type == ControllerType::ProController) ? 0x2F : 0x27;
+            SendCustomCommands(controller.writeChar, featureFlags, false);
             std::this_thread::sleep_for(std::chrono::milliseconds(200));
             SetPlayerLEDs(controller.writeChar, static_cast<uint8_t>(1 << (GetPlayerCount())));
             EmitSound(controller.writeChar);
         }
 
         try {
-            proPlayers.push_back({ controller, target, type, nullptr, swapFlag, rawVibFlag, xboxModeFlag, controller.bleAddress });
+            proPlayers.push_back({ controller, target, type, nullptr, swapFlag, xboxModeFlag, controller.bleAddress });
         } catch (...) {
             DisableInputCallback(controller.inputChar, inputChangedToken, inputCallbackGate);
             vigem.RemoveTarget(target);
@@ -1332,8 +1313,11 @@ public:
         pp.inputChangedToken = inputChangedToken;
         pp.inputCallbackGate = inputCallbackGate;
         pp.vibCtx = std::make_unique<VibrationContext>();
-        pp.vibCtx->writeChar = controller.writeChar;
-        pp.vibCtx->useRawVibration = rawVibFlag;
+        pp.vibCtx->vibrationChar = controller.vibrationChar;
+        pp.vibCtx->reportKind = (type == ControllerType::ProController)
+            ? VibrationReportKind::DualMotor
+            : VibrationReportKind::GameCube;
+        StartVibrationWorker(*pp.vibCtx);
         if (xboxMode) {
             vigem_target_x360_register_notification(
                 vigem.GetClient(), target, X360VibrationCallback, pp.vibCtx.get());
@@ -1360,6 +1344,7 @@ public:
                 vigem_target_x360_unregister_notification(singlePlayers[idx]->ds4Controller);
             else
                 vigem_target_ds4_unregister_notification(singlePlayers[idx]->ds4Controller);
+            StopVibrationWorker(*singlePlayers[idx]->vibCtx);
             ViGEmManager::Instance().RemoveTarget(singlePlayers[idx]->ds4Controller);
             singlePlayers.erase(singlePlayers.begin() + idx);
             return;
@@ -1379,6 +1364,7 @@ public:
                 vigem_target_x360_unregister_notification(dualPlayers[idx]->ds4Controller);
             else
                 vigem_target_ds4_unregister_notification(dualPlayers[idx]->ds4Controller);
+            StopVibrationWorker(*dualPlayers[idx]->vibCtx);
             ViGEmManager::Instance().RemoveTarget(dualPlayers[idx]->ds4Controller);
             dualPlayers.erase(dualPlayers.begin() + idx);
             return;
@@ -1392,6 +1378,7 @@ public:
                 vigem_target_x360_unregister_notification(proPlayers[idx].ds4Controller);
             else
                 vigem_target_ds4_unregister_notification(proPlayers[idx].ds4Controller);
+            StopVibrationWorker(*proPlayers[idx].vibCtx);
             ViGEmManager::Instance().RemoveTarget(proPlayers[idx].ds4Controller);
             proPlayers.erase(proPlayers.begin() + idx);
             return;
@@ -1419,6 +1406,7 @@ public:
                 vigem_target_x360_unregister_notification(dp->ds4Controller);
             else
                 vigem_target_ds4_unregister_notification(dp->ds4Controller);
+            StopVibrationWorker(*dp->vibCtx);
             ViGEmManager::Instance().RemoveTarget(dp->ds4Controller);
         }
         dualPlayers.clear();
@@ -1430,6 +1418,7 @@ public:
                 vigem_target_x360_unregister_notification(sp->ds4Controller);
             else
                 vigem_target_ds4_unregister_notification(sp->ds4Controller);
+            StopVibrationWorker(*sp->vibCtx);
             ViGEmManager::Instance().RemoveTarget(sp->ds4Controller);
         }
         singlePlayers.clear();
@@ -1441,6 +1430,7 @@ public:
                 vigem_target_x360_unregister_notification(pp.ds4Controller);
             else
                 vigem_target_ds4_unregister_notification(pp.ds4Controller);
+            StopVibrationWorker(*pp.vibCtx);
             ViGEmManager::Instance().RemoveTarget(pp.ds4Controller);
         }
         proPlayers.clear();
@@ -1502,6 +1492,7 @@ private:
             vigem_target_x360_unregister_notification(player.ds4Controller);
         else
             vigem_target_ds4_unregister_notification(player.ds4Controller);
+        StopVibrationWorker(*player.vibCtx);
         ViGEmManager::Instance().RemoveTarget(player.ds4Controller);
     }
 
