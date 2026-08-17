@@ -33,6 +33,13 @@ static void InitializeDS4Report(DS4_REPORT_EX& report) {
     DS4_REPORT_INIT(reinterpret_cast<PDS4_REPORT>(&report.Report));
     report.Report.bBatteryLvl = 0xFF;
     report.Report.bBatteryLvlSpecial = 0x1A; // Wired, 100% battery
+
+    report.Report.sCurrentTouch.bIsUpTrackingNum1 = 0x80;
+    report.Report.sCurrentTouch.bIsUpTrackingNum2 = 0x80;
+    for (auto& touch : report.Report.sPreviousTouch) {
+        touch.bIsUpTrackingNum1 = 0x80;
+        touch.bIsUpTrackingNum2 = 0x80;
+    }
 }
 
 StickData DecodeJoystick(const std::vector<uint8_t>& buffer, JoyConSide side, JoyConOrientation orientation) {
