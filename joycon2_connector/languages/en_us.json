@@ -29,8 +29,6 @@
     "dash_settings": "Settings",
     "dash_swap_abxy": "Swap A⇄B / X⇄Y",
     "dash_swap_abxy_hint": "Nintendo ⇄ Xbox button layout",
-    "dash_raw_vibration": "Raw vibration mode",
-    "dash_raw_vibration_hint": "Disable if vibration feels wrong; enable if controller beeps during rumble",
     "dash_xbox_emulation": "Map as Xbox controller",
     "dash_xbox_emulation_hint": "Gyro and touchpad will be disabled",
     "dash_xbox_warning_title": "Notice",

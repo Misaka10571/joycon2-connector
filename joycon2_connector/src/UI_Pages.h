@@ -869,23 +869,6 @@ inline void RenderDashboard() {
                 ImGui::Separator();
                 ImGui::Spacing();
 
-                // Raw vibration toggle (Pro2 / NSO GC)
-                bool rawVib = p.useRawVibrationFlag->load(std::memory_order_relaxed);
-                if (ImGui::Checkbox(T("dash_raw_vibration"), &rawVib)) {
-                    p.useRawVibrationFlag->store(rawVib, std::memory_order_relaxed);
-                    ConfigManager::Instance().GetDeviceSettings(p.bleAddress).useRawVibration = rawVib;
-                    ConfigManager::Instance().Save();
-                    // Also update the live VibrationContext if it exists
-                    if (p.vibCtx && p.vibCtx->useRawVibration) {
-                        p.vibCtx->useRawVibration->store(rawVib, std::memory_order_relaxed);
-                    }
-                }
-                ImGui::TextColored(UITheme::TextTertiary, "%s", T("dash_raw_vibration_hint"));
-
-                ImGui::Spacing();
-                ImGui::Separator();
-                ImGui::Spacing();
-
                 // Xbox emulation toggle
                 bool xbox = ConfigManager::Instance().GetDeviceSettings(p.bleAddress).useXboxEmulation;
                 if (ImGui::Checkbox(T("dash_xbox_emulation"), &xbox)) {

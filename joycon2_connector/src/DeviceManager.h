@@ -30,11 +30,16 @@ constexpr uint16_t JOYCON_MANUFACTURER_ID = 1363;
 inline const std::vector<uint8_t> JOYCON_MANUFACTURER_PREFIX = { 0x01, 0x00, 0x03, 0x7E };
 inline const wchar_t* INPUT_REPORT_UUID_STR = L"ab7de9be-89fe-49ad-828f-118f09df7fd2";
 inline const wchar_t* WRITE_COMMAND_UUID_STR = L"649d4ac9-8eb7-4e6c-af44-1ea54fe5f005";
+inline const wchar_t* VIBRATION_JOYCON_LEFT_UUID_STR = L"289326cb-a471-485d-a8f4-240c14f18241";
+inline const wchar_t* VIBRATION_JOYCON_RIGHT_UUID_STR = L"fa19b0fb-cd1f-46a7-84a1-bbb09e00c149";
+inline const wchar_t* VIBRATION_PRO_UUID_STR = L"cc483f51-9258-427d-a939-630c31f72b05";
+inline const wchar_t* VIBRATION_GC_UUID_STR = L"3f8fb670-ab25-45bf-b540-38c72834d064";
 
 struct ConnectedJoyCon {
     BluetoothLEDevice device = nullptr;
     GattCharacteristic inputChar = nullptr;
     GattCharacteristic writeChar = nullptr;
+    GattCharacteristic vibrationChar = nullptr;
     uint64_t bleAddress = 0;
 };
 
@@ -584,6 +589,11 @@ private:
                     cj.inputChar = characteristic;
                 else if (uuid == guid(WRITE_COMMAND_UUID_STR))
                     cj.writeChar = characteristic;
+                else if (uuid == guid(VIBRATION_JOYCON_LEFT_UUID_STR) ||
+                         uuid == guid(VIBRATION_JOYCON_RIGHT_UUID_STR) ||
+                         uuid == guid(VIBRATION_PRO_UUID_STR) ||
+                         uuid == guid(VIBRATION_GC_UUID_STR))
+                    cj.vibrationChar = characteristic;
             }
         }
 
@@ -601,8 +611,13 @@ private:
         }
         if (!cj.writeChar) {
             APP_LOG_WARNING("Write-command characteristic %S was not found for address %llu; "
-                            "LED/vibration/command features will be unavailable",
+                            "LED and command features will be unavailable",
                             WRITE_COMMAND_UUID_STR, cj.bleAddress);
+        }
+        if (!cj.vibrationChar) {
+            APP_LOG_WARNING("Vibration output characteristic was not found for address %llu; "
+                            "runtime vibration will be unavailable",
+                            cj.bleAddress);
         }
 
         // Request shortest connection interval (7.5ms) for minimal input lag
@@ -628,9 +643,10 @@ private:
         }
 
         state.store(ScanState::Found);
-        APP_LOG_INFO("BLE scan succeeded (address: %llu, input characteristic: found, write characteristic: %s)",
-                     cj.bleAddress,
-                     cj.writeChar ? "found" : "missing");
+        APP_LOG_INFO("BLE scan succeeded (address: %llu, input characteristic: found, write characteristic: %s, vibration characteristic: %s)",
+                      cj.bleAddress,
+                      cj.writeChar ? "found" : "missing",
+                      cj.vibrationChar ? "found" : "missing");
         Notify(callback, { cj, ScanState::Found, {} });
     }
 

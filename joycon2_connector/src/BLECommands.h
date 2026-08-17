@@ -4,6 +4,7 @@
 #include <winrt/Windows.Storage.Streams.h>
 #include <winrt/Windows.Devices.Bluetooth.GenericAttributeProfile.h>
 #include "BluetoothLog.h"
+#include <algorithm>
 #include <vector>
 #include <thread>
 #include <chrono>
@@ -48,40 +49,49 @@ inline void SendGenericCommand(GattCharacteristic const& characteristic, uint8_t
     std::this_thread::sleep_for(std::chrono::milliseconds(35));
 }
 
-inline void SendCustomCommands(GattCharacteristic const& characteristic) {
-    std::vector<std::vector<uint8_t>> commands = {
-        { 0x0c, 0x91, 0x01, 0x02, 0x00, 0x04, 0x00, 0x00, 0xFF, 0x00, 0x00, 0x00 },
-        { 0x0c, 0x91, 0x01, 0x04, 0x00, 0x04, 0x00, 0x00, 0xFF, 0x00, 0x00, 0x00 }
-    };
+enum class VibrationReportKind : uint8_t {
+    SingleMotor,
+    DualMotor,
+    GameCube,
+};
 
-    for (size_t index = 0; index < commands.size(); ++index) {
-        const auto& cmd = commands[index];
-        auto writer = DataWriter();
-        writer.WriteBytes(cmd);
-        IBuffer buffer = writer.DetachBuffer();
-        APP_LOG_DEBUG("Sending custom init command %zu/%zu (%zu byte(s))",
-                      index + 1, commands.size(), cmd.size());
+enum class GameCubeRumbleState : uint8_t {
+    Off,
+    On,
+    Stop,
+};
 
-        try {
-            auto status = characteristic.WriteValueAsync(buffer, GattWriteOption::WriteWithoutResponse).get();
-            if (status != GattCommunicationStatus::Success) {
-                APP_LOG_WARNING("Custom init command %zu failed: %s",
-                                index + 1, BluetoothLog::DescribeGattStatus(status).c_str());
-            }
-        } catch (const winrt::hresult_error& e) {
-            APP_LOG_ERROR("Custom init command %zu threw: %s",
-                          index + 1, BluetoothLog::DescribeHResultError(e).c_str());
-        } catch (...) {
-            APP_LOG_ERROR("Custom init command %zu threw an unknown exception", index + 1);
-        }
-
-        std::this_thread::sleep_for(std::chrono::milliseconds(300));
+inline std::vector<uint8_t> BuildVibrationInitPayload(bool joyConProfile) {
+    std::vector<uint8_t> data(0x14, 0x00);
+    data[0] = 0x01;
+    if (joyConProfile) {
+        data[1] = 0x59;
+        data[2] = 0x09;
+        for (int i = 5; i <= 8; ++i) data[i] = 0xFF;
+    } else {
+        for (int i = 1; i <= 8; ++i) data[i] = 0xFF;
     }
+    data[9] = 0x35;
+    data[11] = 0x46;
+    return data;
+}
+
+inline void SendCustomCommands(GattCharacteristic const& characteristic,
+                               uint8_t featureFlags,
+                               bool joyConProfile) {
+    if (!characteristic) return;
+
+    std::vector<uint8_t> featureData(4, 0x00);
+    featureData[0] = featureFlags;
+
+    SendGenericCommand(characteristic, 0x0C, 0x02, featureData);
+    SendGenericCommand(characteristic, 0x0A, 0x08, BuildVibrationInitPayload(joyConProfile));
+    SendGenericCommand(characteristic, 0x0C, 0x04, featureData);
 }
 
 inline void EmitSound(GattCharacteristic const& characteristic) {
-    std::vector<uint8_t> data(8, 0x00);
-    data[0] = 0x04;
+    std::vector<uint8_t> data(4, 0x00);
+    data[0] = 0x03;
     SendGenericCommand(characteristic, 0x0A, 0x02, data);
 }
 
@@ -91,69 +101,110 @@ inline void SetPlayerLEDs(GattCharacteristic const& characteristic, uint8_t patt
     SendGenericCommand(characteristic, 0x09, 0x07, data);
 }
 
-// Vibration sample IDs (from protocol reverse engineering)
-enum VibrationSample : uint8_t {
-    VIB_NONE        = 0x00,  // No sound / stop
-    VIB_BUZZ        = 0x01,  // 1s sustained buzz
-    VIB_FIND        = 0x02,  // Find controller (high pitch + beeps)
-    VIB_CONNECT     = 0x03,  // Button click sound
-    VIB_PAIRING     = 0x04,  // Pairing sound
-    VIB_STRONG_THUNK= 0x05,  // Strong thunk impact
-    VIB_DUN         = 0x06,  // Short dun
-    VIB_DING        = 0x07,  // Short ding
-};
-
-// Send a predefined vibration sample via the command channel
-inline void SendVibrationSample(GattCharacteristic const& characteristic, uint8_t sampleId) {
-    std::vector<uint8_t> data(8, 0x00);
-    data[0] = sampleId;
-    SendGenericCommand(characteristic, 0x0A, 0x02, data);
+inline void WriteZeroBytes(DataWriter& writer, int count) {
+    for (int i = 0; i < count; ++i) writer.WriteByte(0x00);
 }
 
-// Send raw vibration data (16-byte frame per motor, protocol format 0x5N)
-// sequenceCounter should increment per frame (only lower 4 bits used)
-inline void SendRawVibration(GattCharacteristic const& characteristic,
-                             bool enabled, const uint8_t vibData[12],
-                             uint8_t sequenceCounter) {
+inline uint16_t ScaleHDRumbleAmplitude(uint8_t motor) {
+    // The protocol allows 0..1023, but existing drivers cap at about 450 to protect the LRA.
+    constexpr uint16_t MAX_SAFE_AMPLITUDE = 450;
+    return static_cast<uint16_t>((static_cast<uint32_t>(motor) * MAX_SAFE_AMPLITUDE + 127) / 255);
+}
+
+inline void WriteHDRumbleSlot(DataWriter& writer,
+                              uint8_t largeMotor,
+                              uint8_t smallMotor,
+                              uint8_t sequenceCounter) {
+    constexpr uint16_t HIGH_FREQUENCY = 0x187;
+    constexpr uint16_t LOW_FREQUENCY = 0x112;
+
+    uint16_t highAmplitude = ScaleHDRumbleAmplitude(smallMotor);
+    uint16_t lowAmplitude = ScaleHDRumbleAmplitude(largeMotor);
+
+    writer.WriteByte(0x50 | (sequenceCounter & 0x0F));
+    writer.WriteByte(static_cast<uint8_t>(HIGH_FREQUENCY));
+    writer.WriteByte(static_cast<uint8_t>((HIGH_FREQUENCY >> 8) |
+        ((highAmplitude & 0x3F) << 2)));
+    writer.WriteByte(static_cast<uint8_t>((highAmplitude >> 6) |
+        ((LOW_FREQUENCY & 0x0F) << 4)));
+    writer.WriteByte(static_cast<uint8_t>((LOW_FREQUENCY >> 4) |
+        ((lowAmplitude & 0x03) << 6)));
+    writer.WriteByte(static_cast<uint8_t>(lowAmplitude >> 2));
+    WriteZeroBytes(writer, 10);
+}
+
+inline void SendVibrationReport(GattCharacteristic const& characteristic,
+                                VibrationReportKind kind,
+                                uint8_t largeMotor,
+                                uint8_t smallMotor,
+                                uint8_t sequenceCounter) {
     if (!characteristic) return;
 
     DataWriter writer;
-    // Packet A
-    writer.WriteByte(0x00);                                      // [0] frame header
-    writer.WriteByte(0x50 | (sequenceCounter & 0x0F));           // [1] vibration marker + seq
-    writer.WriteByte(enabled ? 0x01 : 0x00);                     // [2] enabled flag
-    for (int i = 0; i < 12; ++i) writer.WriteByte(vibData[i]);   // [3..14] vibration payload
-    writer.WriteByte(0x00);                                      // [15] padding
+    writer.WriteByte(0x00);
+
+    switch (kind) {
+    case VibrationReportKind::SingleMotor:
+        WriteHDRumbleSlot(writer, largeMotor, smallMotor, sequenceCounter);
+        WriteZeroBytes(writer, 25);
+        break;
+    case VibrationReportKind::DualMotor:
+        WriteHDRumbleSlot(writer, largeMotor, smallMotor, sequenceCounter);
+        WriteHDRumbleSlot(writer, largeMotor, smallMotor, sequenceCounter);
+        WriteZeroBytes(writer, 9);
+        break;
+    case VibrationReportKind::GameCube:
+        writer.WriteByte(static_cast<uint8_t>((largeMotor || smallMotor ? 0x60 : 0x50) |
+            (sequenceCounter & 0x0F)));
+        writer.WriteByte(0x00);
+        writer.WriteByte(largeMotor || smallMotor ? 0x01 : 0x00);
+        writer.WriteByte(0x00);
+        WriteZeroBytes(writer, 37);
+        break;
+    }
 
     IBuffer buffer = writer.DetachBuffer();
     try {
         auto status = characteristic.WriteValueAsync(buffer, GattWriteOption::WriteWithoutResponse).get();
         if (status != GattCommunicationStatus::Success) {
-            APP_LOG_DEBUG("Raw vibration write failed: %s",
+            APP_LOG_DEBUG("Vibration report write failed: %s",
                           BluetoothLog::DescribeGattStatus(status).c_str());
         }
     } catch (const winrt::hresult_error& e) {
-        APP_LOG_DEBUG("Raw vibration write threw: %s",
+        APP_LOG_DEBUG("Vibration report write threw: %s",
                       BluetoothLog::DescribeHResultError(e).c_str());
     } catch (...) {
-        APP_LOG_DEBUG("Raw vibration write threw an unknown exception");
+        APP_LOG_DEBUG("Vibration report write threw an unknown exception");
     }
-    // No sleep — raw vibration needs low latency
 }
 
-// Encode DS4 motor values into a 12-byte Switch 2 raw vibration payload.
-// The exact 12-byte format for Switch 2 HD Rumble is not yet fully reverse-engineered.
-// The critical fix is using the raw vibration channel (0x5N packet) instead of
-// predefined sound/haptic samples (cmd 0x0A), which cause audible beeping on Pro2.
-inline void EncodeVibrationPayload(uint8_t largeMotor, uint8_t smallMotor, uint8_t outData[12]) {
-    for (int i = 0; i < 12; ++i) outData[i] = 0;
-    // LargeMotor -> low-frequency rumble, SmallMotor -> high-frequency rumble.
-    // Place amplitude values at payload positions. This encoding may need
-    // refinement once the full Switch 2 vibration protocol is documented.
-    outData[0] = largeMotor;
-    outData[1] = smallMotor;
-    outData[2] = largeMotor;
-    outData[3] = smallMotor;
+inline void SendGameCubeVibrationReport(GattCharacteristic const& characteristic,
+                                         GameCubeRumbleState state,
+                                         uint8_t sequenceCounter) {
+    if (!characteristic) return;
+
+    DataWriter writer;
+    writer.WriteByte(0x00);
+    writer.WriteByte(static_cast<uint8_t>((state == GameCubeRumbleState::On ? 0x60 : 0x50) |
+        (sequenceCounter & 0x0F)));
+    writer.WriteByte(state == GameCubeRumbleState::Stop ? 0x02 : 0x00);
+    writer.WriteByte(state == GameCubeRumbleState::On ? 0x01 : 0x00);
+    writer.WriteByte(0x00);
+    WriteZeroBytes(writer, 37);
+
+    IBuffer buffer = writer.DetachBuffer();
+    try {
+        auto status = characteristic.WriteValueAsync(buffer, GattWriteOption::WriteWithoutResponse).get();
+        if (status != GattCommunicationStatus::Success) {
+            APP_LOG_DEBUG("GameCube vibration report write failed: %s",
+                          BluetoothLog::DescribeGattStatus(status).c_str());
+        }
+    } catch (const winrt::hresult_error& e) {
+        APP_LOG_DEBUG("GameCube vibration report write threw: %s",
+                      BluetoothLog::DescribeHResultError(e).c_str());
+    } catch (...) {
+        APP_LOG_DEBUG("GameCube vibration report write threw an unknown exception");
+    }
 }
 
 // Non-blocking versions for use inside BLE notification callbacks
@@ -170,19 +221,3 @@ inline void EmitSoundAsync(GattCharacteristic characteristic) {
     }).detach();
 }
 
-// Async vibration sample for use from ViGEm callbacks
-inline void SendVibrationSampleAsync(GattCharacteristic characteristic, uint8_t sampleId) {
-    std::thread([characteristic, sampleId]() {
-        SendVibrationSample(characteristic, sampleId);
-    }).detach();
-}
-
-// Async raw vibration for use from ViGEm callbacks (avoids blocking callback thread)
-inline void SendRawVibrationAsync(GattCharacteristic characteristic,
-                                   bool enabled, const uint8_t vibData[12],
-                                   uint8_t sequenceCounter) {
-    std::vector<uint8_t> data(vibData, vibData + 12);
-    std::thread([characteristic, enabled, data, sequenceCounter]() {
-        SendRawVibration(characteristic, enabled, data.data(), sequenceCounter);
-    }).detach();
-}
