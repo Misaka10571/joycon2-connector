@@ -62,7 +62,7 @@ struct AppConfig {
     std::map<uint64_t, DeviceSettings> deviceSettings;  // per-device settings, keyed by BLE address
     float gyroSensitivity = 1.0f;  // DS4 gyro multiplier (1.0 = raw JoyCon2 values)
     bool minimizeToTray = false;  // Minimize to system tray on close instead of exiting
-    bool autoCheckUpdate = false;  // Auto check for updates on startup (default off)
+    bool autoCheckUpdate = true;  // Auto check for updates on startup (default on)
     bool suppressXboxWarning = false;  // Don't show Xbox emulation gyro warning
     bool nonWindows11WarningShown = false;  // Only show the Bluetooth rate warning once
 };
@@ -283,7 +283,7 @@ inline bool JSONToConfig(const std::string& json, AppConfig& config) {
     config.minimizeToTray = ExtractJsonBool(json, "minimizeToTray", false);
 
     // Parse autoCheckUpdate
-    config.autoCheckUpdate = ExtractJsonBool(json, "autoCheckUpdate", false);
+    config.autoCheckUpdate = ExtractJsonBool(json, "autoCheckUpdate", true);
 
     // Parse suppressXboxWarning
     config.suppressXboxWarning = ExtractJsonBool(json, "suppressXboxWarning", false);

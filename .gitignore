@@ -5,7 +5,5 @@ joycon2_connector/build_check/
 .claude/
 .vscode/
 docs/
-command_handler.lua
-common.lua
-input_handler.lua
+handler/
 AGENTS.md
