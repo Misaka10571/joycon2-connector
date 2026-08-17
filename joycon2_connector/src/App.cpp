@@ -929,6 +929,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
             ConfigManager::Instance().config.nonWindows11WarningShown = true;
             ConfigManager::Instance().Save();
         }
+        RenderUpdateAvailablePopup();
 
         ImGui::End();
 
