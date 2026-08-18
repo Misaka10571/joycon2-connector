@@ -31,7 +31,9 @@ struct VibrationContext {
     std::mutex workerMutex;
     std::condition_variable workerCV;
     uint8_t sequenceCounter = 0;  // report sequence (lower 4 bits used by HD rumble slots)
-    static constexpr int REFRESH_INTERVAL_MS = 12;
+    int outputLinkCount = 0;
+    inline static std::atomic<int> connectedOutputLinkCount{ 0 };
+    static constexpr int BASE_REFRESH_INTERVAL_MS = 36;
 };
 
 struct InputCallbackGate {
@@ -54,11 +56,15 @@ inline void SendVibrationFrame(VibrationContext& ctx, uint8_t largeMotor, uint8_
 }
 
 inline bool StartVibrationWorker(VibrationContext& ctx) {
-    bool hasOutput = ctx.isDual
-        ? static_cast<bool>(ctx.vibrationCharLeft) || static_cast<bool>(ctx.vibrationCharRight)
-        : static_cast<bool>(ctx.vibrationChar);
-    if (!hasOutput) return false;
+    int outputLinkCount = ctx.isDual
+        ? static_cast<int>(static_cast<bool>(ctx.vibrationCharLeft)) +
+            static_cast<int>(static_cast<bool>(ctx.vibrationCharRight))
+        : static_cast<int>(static_cast<bool>(ctx.vibrationChar));
+    if (outputLinkCount == 0) return false;
     if (ctx.workerRunning.exchange(true, std::memory_order_acq_rel)) return true;
+
+    ctx.outputLinkCount = outputLinkCount;
+    VibrationContext::connectedOutputLinkCount.fetch_add(outputLinkCount, std::memory_order_acq_rel);
 
     try {
         ctx.workerThread = std::thread([&ctx]() {
@@ -85,8 +91,13 @@ inline bool StartVibrationWorker(VibrationContext& ctx) {
                 outputActive = true;
 
                 std::unique_lock<std::mutex> lock(ctx.workerMutex);
+                // Each packet carries three subframes. Share the packet rate across BLE links
+                // while preserving the original number of vibration samples per second.
+                int connectedLinks = (std::max)(1,
+                    VibrationContext::connectedOutputLinkCount.load(std::memory_order_acquire));
                 ctx.workerCV.wait_for(lock,
-                    std::chrono::milliseconds(VibrationContext::REFRESH_INTERVAL_MS),
+                    std::chrono::milliseconds(
+                        VibrationContext::BASE_REFRESH_INTERVAL_MS * connectedLinks),
                     [&ctx, largeMotor, smallMotor]() {
                         return !ctx.workerRunning.load(std::memory_order_acquire) ||
                             ctx.largeMotor.load(std::memory_order_relaxed) != largeMotor ||
@@ -125,6 +136,9 @@ inline bool StartVibrationWorker(VibrationContext& ctx) {
         });
     } catch (...) {
         ctx.workerRunning.store(false, std::memory_order_release);
+        VibrationContext::connectedOutputLinkCount.fetch_sub(ctx.outputLinkCount,
+            std::memory_order_acq_rel);
+        ctx.outputLinkCount = 0;
         APP_LOG_ERROR("Failed to start vibration output worker");
         return false;
     }
@@ -134,9 +148,14 @@ inline bool StartVibrationWorker(VibrationContext& ctx) {
 inline void StopVibrationWorker(VibrationContext& ctx) {
     ctx.largeMotor.store(0, std::memory_order_relaxed);
     ctx.smallMotor.store(0, std::memory_order_relaxed);
-    ctx.workerRunning.store(false, std::memory_order_release);
+    bool wasRunning = ctx.workerRunning.exchange(false, std::memory_order_acq_rel);
     ctx.workerCV.notify_one();
     if (ctx.workerThread.joinable()) ctx.workerThread.join();
+    if (wasRunning && ctx.outputLinkCount != 0) {
+        VibrationContext::connectedOutputLinkCount.fetch_sub(ctx.outputLinkCount,
+            std::memory_order_acq_rel);
+        ctx.outputLinkCount = 0;
+    }
 }
 
 inline void HandleVibrationOutput(VibrationContext* ctx, UCHAR LargeMotor, UCHAR SmallMotor) {
@@ -145,10 +164,13 @@ inline void HandleVibrationOutput(VibrationContext* ctx, UCHAR LargeMotor, UCHAR
     auto& vibConfig = ConfigManager::Instance().config.vibrationConfig;
     float scaledLarge = vibConfig.enabled ? LargeMotor * vibConfig.intensity : 0.0f;
     float scaledSmall = vibConfig.enabled ? SmallMotor * vibConfig.intensity : 0.0f;
-    ctx->largeMotor.store(static_cast<uint8_t>((std::min)(scaledLarge, 255.0f)),
-        std::memory_order_relaxed);
-    ctx->smallMotor.store(static_cast<uint8_t>((std::min)(scaledSmall, 255.0f)),
-        std::memory_order_relaxed);
+    uint8_t largeMotor = static_cast<uint8_t>((std::min)(scaledLarge, 255.0f));
+    uint8_t smallMotor = static_cast<uint8_t>((std::min)(scaledSmall, 255.0f));
+    APP_LOG_DEBUG("Vibration request: large=%u small=%u (scaled=%u/%u)",
+        static_cast<unsigned>(LargeMotor), static_cast<unsigned>(SmallMotor),
+        static_cast<unsigned>(largeMotor), static_cast<unsigned>(smallMotor));
+    ctx->largeMotor.store(largeMotor, std::memory_order_relaxed);
+    ctx->smallMotor.store(smallMotor, std::memory_order_relaxed);
     ctx->workerCV.notify_one();
 }
 

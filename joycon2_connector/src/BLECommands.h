@@ -122,15 +122,16 @@ inline void WriteHDRumbleSlot(DataWriter& writer,
     uint16_t lowAmplitude = ScaleHDRumbleAmplitude(largeMotor);
 
     writer.WriteByte(0x50 | (sequenceCounter & 0x0F));
-    writer.WriteByte(static_cast<uint8_t>(HIGH_FREQUENCY));
-    writer.WriteByte(static_cast<uint8_t>((HIGH_FREQUENCY >> 8) |
-        ((highAmplitude & 0x3F) << 2)));
-    writer.WriteByte(static_cast<uint8_t>((highAmplitude >> 6) |
-        ((LOW_FREQUENCY & 0x0F) << 4)));
-    writer.WriteByte(static_cast<uint8_t>((LOW_FREQUENCY >> 4) |
-        ((lowAmplitude & 0x03) << 6)));
-    writer.WriteByte(static_cast<uint8_t>(lowAmplitude >> 2));
-    WriteZeroBytes(writer, 10);
+    for (int sample = 0; sample < 3; ++sample) {
+        writer.WriteByte(static_cast<uint8_t>(HIGH_FREQUENCY));
+        writer.WriteByte(static_cast<uint8_t>((HIGH_FREQUENCY >> 8) |
+            ((highAmplitude & 0x3F) << 2)));
+        writer.WriteByte(static_cast<uint8_t>((highAmplitude >> 6) |
+            ((LOW_FREQUENCY & 0x0F) << 4)));
+        writer.WriteByte(static_cast<uint8_t>((LOW_FREQUENCY >> 4) |
+            ((lowAmplitude & 0x03) << 6)));
+        writer.WriteByte(static_cast<uint8_t>(lowAmplitude >> 2));
+    }
 }
 
 inline void SendVibrationReport(GattCharacteristic const& characteristic,
@@ -146,12 +147,10 @@ inline void SendVibrationReport(GattCharacteristic const& characteristic,
     switch (kind) {
     case VibrationReportKind::SingleMotor:
         WriteHDRumbleSlot(writer, largeMotor, smallMotor, sequenceCounter);
-        WriteZeroBytes(writer, 25);
         break;
     case VibrationReportKind::DualMotor:
         WriteHDRumbleSlot(writer, largeMotor, smallMotor, sequenceCounter);
         WriteHDRumbleSlot(writer, largeMotor, smallMotor, sequenceCounter);
-        WriteZeroBytes(writer, 9);
         break;
     case VibrationReportKind::GameCube:
         writer.WriteByte(static_cast<uint8_t>((largeMotor || smallMotor ? 0x60 : 0x50) |
@@ -164,6 +163,7 @@ inline void SendVibrationReport(GattCharacteristic const& characteristic,
     }
 
     IBuffer buffer = writer.DetachBuffer();
+    auto writeStarted = std::chrono::steady_clock::now();
     try {
         auto status = characteristic.WriteValueAsync(buffer, GattWriteOption::WriteWithoutResponse).get();
         if (status != GattCommunicationStatus::Success) {
@@ -175,6 +175,11 @@ inline void SendVibrationReport(GattCharacteristic const& characteristic,
                       BluetoothLog::DescribeHResultError(e).c_str());
     } catch (...) {
         APP_LOG_DEBUG("Vibration report write threw an unknown exception");
+    }
+    auto writeElapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - writeStarted).count();
+    if (writeElapsedMs >= 50) {
+        APP_LOG_DEBUG("Vibration report write took %lld ms", writeElapsedMs);
     }
 }
 
