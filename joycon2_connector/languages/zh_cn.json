@@ -142,6 +142,9 @@
     "settings_minimize_to_tray": "关闭时最小化到托盘",
     "settings_minimize_to_tray_hint": "关闭窗口时最小化到系统托盘而非退出程序",
 
+    "settings_player_leds": "玩家指示灯",
+    "settings_player_leds_hint": "关闭后手柄上的 4 颗玩家指示灯全部熄灭（切换鼠标模式时也不再点亮），对已连接的手柄立即生效",
+
     "settings_auto_check_update": "启动时自动检查更新",
     "settings_auto_check_update_hint": "程序启动时自动检查是否有新版本",
     "settings_check_update": "检查更新",

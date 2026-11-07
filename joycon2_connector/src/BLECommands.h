@@ -34,6 +34,12 @@ inline void SendGenericCommand(GattCharacteristic const& characteristic, uint8_t
     try {
         auto status = characteristic.WriteValueAsync(buffer, GattWriteOption::WriteWithoutResponse).get();
         if (status != GattCommunicationStatus::Success) {
+            // Some links reject write-without-response (e.g. right after the
+            // connection comes up). Retry with an acknowledged write so the
+            // command is not silently dropped.
+            status = characteristic.WriteValueAsync(buffer, GattWriteOption::WriteWithResponse).get();
+        }
+        if (status != GattCommunicationStatus::Success) {
             APP_LOG_WARNING("BLE command cmd=0x%02X subCmd=0x%02X failed: %s",
                             cmdId, subCmdId,
                             BluetoothLog::DescribeGattStatus(status).c_str());
@@ -93,6 +99,17 @@ inline void EmitSound(GattCharacteristic const& characteristic) {
     std::vector<uint8_t> data(4, 0x00);
     data[0] = 0x03;
     SendGenericCommand(characteristic, 0x0A, 0x02, data);
+}
+
+// cmd 0x09 / sub 0x07 takes an 8-byte argument; byte 0 is a 4-bit bitmask for
+// the four player LEDs, 0x00 switches all of them off. Values above 0x0F are
+// outside the valid mask: the old "1 << playerCount" expression shifts past the
+// fourth controller and leaves the LEDs in an undefined / blinking state.
+inline uint8_t MakePlayerLEDMask(int ledIndex, bool enabled) {
+    if (!enabled) return 0x00;
+    if (ledIndex < 0) ledIndex = 0;
+    if (ledIndex > 3) ledIndex = 3;   // only four player LEDs exist
+    return static_cast<uint8_t>(1u << ledIndex);
 }
 
 inline void SetPlayerLEDs(GattCharacteristic const& characteristic, uint8_t pattern) {

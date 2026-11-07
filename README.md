@@ -132,6 +132,10 @@ Protocol and internal errors may have no reliable generic remedy. In those cases
 **Controller stops connecting after multiple attempts:**
 This is a known controller-level cooldown behavior — not an OS or Bluetooth stack issue. Simply wait a few minutes and try again.
 
+**Player LEDs keep blinking / how to turn them off:**
+When a controller is connected to a PC over BLE without a host assigning its player LEDs, the firmware keeps running its built-in searching/pairing blink pattern. By default the app lights the LED matching the player number and leaves it steady; it also re-sends the mask a few times during the first seconds after connecting so an init-time write cannot be lost. Uncheck **Settings -> Player Indicator LEDs** to send a `0x00` mask that turns all four LEDs off; the change applies to connected controllers immediately, and switching mouse modes with the CHAT button no longer lights them again. If it still keeps blinking, disconnect and reconnect once.
+Older builds computed the mask as `1 << playerCount`; with four or more controllers already connected the bit shifts out of the valid 4-bit range, which can leave the LEDs blinking. The mask is now clamped to the valid lower four bits.
+
 **ViGEm not detected:**
 Make sure the ViGEmBus driver is installed *before* launching the app. The status indicator on the Dashboard will show green when it's connected.
 

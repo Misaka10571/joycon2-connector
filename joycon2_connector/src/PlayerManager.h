@@ -481,6 +481,50 @@ inline void HandleSpecialProButtons(const std::vector<uint8_t>& buffer) {
     g_cButtonPressed = cPressed;
 }
 
+// Player indicator LEDs: route every write through these helpers so the
+// "keep LEDs off" setting is honoured on connect, on CHAT/mouse-mode changes,
+// and when the user toggles the option at runtime.
+inline bool PlayerLEDsEnabled() {
+    return ConfigManager::Instance().config.ledConfig.enabled;
+}
+
+inline void ApplyPlayerLEDs(GattCharacteristic const& characteristic, int ledIndex) {
+    if (!characteristic) return;
+    const uint8_t mask = MakePlayerLEDMask(ledIndex, PlayerLEDsEnabled());
+    SetPlayerLEDs(characteristic, mask);
+    // At connect time the controller may still be running its built-in pairing
+    // blink. Repeat the "all off" mask so a dropped BLE write cannot leave it
+    // blinking forever.
+    if (mask == 0x00) SetPlayerLEDs(characteristic, mask);
+}
+
+// Non-blocking variant for use inside BLE notification callbacks.
+inline void ApplyPlayerLEDsAsync(GattCharacteristic characteristic, int ledIndex) {
+    if (!characteristic) return;
+    const uint8_t mask = MakePlayerLEDMask(ledIndex, PlayerLEDsEnabled());
+    std::thread([characteristic, mask]() {
+        SetPlayerLEDs(characteristic, mask);
+    }).detach();
+}
+
+// The controller starts its built-in "searching for a host" LED blink as soon
+// as the BLE link comes up and can override a player-LED mask that arrives
+// while it is still processing the init commands. Re-assert the mask a few
+// times while the link settles so the indicator ends up steady instead of
+// blinking forever.
+inline void SchedulePlayerLEDRefresh(GattCharacteristic characteristic, int ledIndex) {
+    if (!characteristic) return;
+    std::thread([characteristic, ledIndex]() {
+        constexpr int refreshDelaysMs[] = { 700, 1800, 4000 };
+        int elapsedMs = 0;
+        for (int targetMs : refreshDelaysMs) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(targetMs - elapsedMs));
+            elapsedMs = targetMs;
+            SetPlayerLEDs(characteristic, MakePlayerLEDMask(ledIndex, PlayerLEDsEnabled()));
+        }
+    }).detach();
+}
+
 class PlayerManager {
 public:
     static PlayerManager& Instance() {
@@ -496,6 +540,45 @@ public:
     std::vector<std::unique_ptr<SingleJoyConPlayer>>& GetSinglePlayers() { return singlePlayers; }
     std::vector<std::unique_ptr<DualJoyConPlayer>>& GetDualPlayers() { return dualPlayers; }
     std::vector<ProControllerPlayer>& GetProPlayers() { return proPlayers; }
+
+    // Re-apply the player-LED setting to every connected controller, so a
+    // Settings toggle takes effect without disconnecting / re-pairing.
+    void ApplyPlayerLEDsToAll() {
+        struct LedTarget {
+            GattCharacteristic writeChar;
+            int ledIndex;
+        };
+        std::vector<LedTarget> targets;
+        {
+            std::lock_guard<std::mutex> operationLock(playerOperationsMutex);
+            int playerIndex = 0;
+            for (auto& sp : singlePlayers) {
+                if (sp && sp->joycon.writeChar)
+                    targets.push_back({ sp->joycon.writeChar, playerIndex });
+                ++playerIndex;
+            }
+            for (auto& dp : dualPlayers) {
+                if (dp) {
+                    // A paired set uses the first and fourth LED (same as on connect).
+                    if (dp->rightJoyCon.writeChar) targets.push_back({ dp->rightJoyCon.writeChar, 0 });
+                    if (dp->leftJoyCon.writeChar)  targets.push_back({ dp->leftJoyCon.writeChar, 3 });
+                }
+                ++playerIndex;
+            }
+            for (auto& pp : proPlayers) {
+                if (pp.controller.writeChar)
+                    targets.push_back({ pp.controller.writeChar, playerIndex });
+                ++playerIndex;
+            }
+        }
+
+        const bool enabled = PlayerLEDsEnabled();
+        for (auto& target : targets) {
+            SetPlayerLEDsAsync(target.writeChar, MakePlayerLEDMask(target.ledIndex, enabled));
+        }
+        APP_LOG_INFO("Re-applied player LEDs to %zu controller link(s) (enabled=%d)",
+                     targets.size(), enabled ? 1 : 0);
+    }
 
     // Add a Single JoyCon player from async scan result
     bool AddSingleJoyCon(ConnectedJoyCon cj, JoyConSide side, JoyConOrientation orientation,
@@ -580,11 +663,9 @@ public:
                 if (chatPressed && !playerPtr->wasChatPressed) {
                     playerPtr->mouseMode = (playerPtr->mouseMode + 1) % 4;
                     APP_LOG_DEBUG("Single Joy-Con CHAT button pressed; mouse mode changed to %d", playerPtr->mouseMode);
-                    uint8_t ledPattern = 0x01;
-                    if (playerPtr->mouseMode == 1) ledPattern = 0x02;
-                    else if (playerPtr->mouseMode == 2) ledPattern = 0x04;
-                    else if (playerPtr->mouseMode == 3) ledPattern = 0x08;
-                    SetPlayerLEDsAsync(playerPtr->joycon.writeChar, ledPattern);
+                    // Mouse mode doubles as the LED index (4 modes / 4 LEDs).
+                    // When LEDs are disabled this writes the 0x00 mask instead.
+                    ApplyPlayerLEDsAsync(playerPtr->joycon.writeChar, playerPtr->mouseMode);
                     EmitSoundAsync(playerPtr->joycon.writeChar);
                 }
                 playerPtr->wasChatPressed = chatPressed;
@@ -823,7 +904,8 @@ public:
         if (player.joycon.writeChar) {
             SendCustomCommands(player.joycon.writeChar, 0x37, true);
             std::this_thread::sleep_for(std::chrono::milliseconds(200));
-            SetPlayerLEDs(player.joycon.writeChar, static_cast<uint8_t>(1 << GetPlayerCount()));
+            ApplyPlayerLEDs(player.joycon.writeChar, GetPlayerCount());
+            SchedulePlayerLEDRefresh(player.joycon.writeChar, GetPlayerCount());
             EmitSound(player.joycon.writeChar);
         }
 
@@ -889,7 +971,8 @@ public:
         if (rightJoyCon.writeChar) {
             SendCustomCommands(rightJoyCon.writeChar, 0x37, true);
             std::this_thread::sleep_for(std::chrono::milliseconds(200));
-            SetPlayerLEDs(rightJoyCon.writeChar, 0x01);
+            ApplyPlayerLEDs(rightJoyCon.writeChar, 0);
+            SchedulePlayerLEDRefresh(rightJoyCon.writeChar, 0);
             EmitSound(rightJoyCon.writeChar);
         }
         return true;
@@ -920,7 +1003,8 @@ public:
         if (leftJoyCon.writeChar) {
             SendCustomCommands(leftJoyCon.writeChar, 0x37, true);
             std::this_thread::sleep_for(std::chrono::milliseconds(200));
-            SetPlayerLEDs(leftJoyCon.writeChar, 0x08);
+            ApplyPlayerLEDs(leftJoyCon.writeChar, 3);
+            SchedulePlayerLEDRefresh(leftJoyCon.writeChar, 3);
             EmitSound(leftJoyCon.writeChar);
         }
 
@@ -1316,7 +1400,8 @@ public:
             uint8_t featureFlags = (type == ControllerType::ProController) ? 0x2F : 0x27;
             SendCustomCommands(controller.writeChar, featureFlags, false);
             std::this_thread::sleep_for(std::chrono::milliseconds(200));
-            SetPlayerLEDs(controller.writeChar, static_cast<uint8_t>(1 << (GetPlayerCount())));
+            ApplyPlayerLEDs(controller.writeChar, GetPlayerCount());
+            SchedulePlayerLEDRefresh(controller.writeChar, GetPlayerCount());
             EmitSound(controller.writeChar);
         }
 

@@ -1581,6 +1581,20 @@ inline void RenderSettings() {
 
     ImGui::Spacing(); ImGui::Spacing();
 
+    // ---- Player indicator LEDs card ----
+    BeginCard();
+
+    bool& ledsEnabled = ConfigManager::Instance().config.ledConfig.enabled;
+    if (ImGui::Checkbox(T("settings_player_leds"), &ledsEnabled)) {
+        ConfigManager::Instance().Save();
+        PlayerManager::Instance().ApplyPlayerLEDsToAll();
+    }
+    ImGui::TextColored(UITheme::TextTertiary, "%s", T("settings_player_leds_hint"));
+
+    EndCard();
+
+    ImGui::Spacing(); ImGui::Spacing();
+
     // ---- Gyro sensitivity card ----
     BeginCard();
 

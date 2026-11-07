@@ -47,6 +47,13 @@ struct VibrationConfig {
     float intensity = 1.0f;    // 0.0 - 1.0 scale factor
 };
 
+// Player indicator LEDs (the four LEDs used for player numbering).
+// When disabled, the app writes a 0x00 mask so the controller keeps them all off
+// instead of falling back to its built-in "searching for a host" blinking pattern.
+struct PlayerLEDConfig {
+    bool enabled = true;
+};
+
 // Per-device settings (keyed by BLE address)
 struct DeviceSettings {
     bool swapABXY = false;  // Swap A⇄B / X⇄Y button positions
@@ -57,11 +64,12 @@ struct AppConfig {
     ProControllerConfig proConfig;
     MouseConfig mouseConfig;
     VibrationConfig vibrationConfig;
+    PlayerLEDConfig ledConfig;
     std::string language;  // "en", "zh", or "" (auto-detect)
     std::map<uint64_t, DeviceSettings> deviceSettings;  // per-device settings, keyed by BLE address
     float gyroSensitivity = 1.0f;  // DS4 gyro multiplier (1.0 = raw JoyCon2 values)
     bool minimizeToTray = false;  // Minimize to system tray on close instead of exiting
-    bool autoCheckUpdate = true;  // Auto check for updates on startup (default on)
+    bool autoCheckUpdate = false; // Auto check for updates on startup (default off)
     bool suppressXboxWarning = false;  // Don't show Xbox emulation gyro warning
     bool nonWindows11WarningShown = false;  // Only show the Bluetooth rate warning once
 };
@@ -151,6 +159,9 @@ inline std::string ConfigToJSON(const AppConfig& config) {
     oss << "  \"vibration\": {\n";
     oss << "    \"enabled\": " << (config.vibrationConfig.enabled ? "true" : "false") << ",\n";
     oss << "    \"intensity\": " << config.vibrationConfig.intensity << "\n";
+    oss << "  },\n";
+    oss << "  \"playerLEDs\": {\n";
+    oss << "    \"enabled\": " << (config.ledConfig.enabled ? "true" : "false") << "\n";
     oss << "  },\n";
     oss << "  \"gyroSensitivity\": " << config.gyroSensitivity << ",\n";
     oss << "  \"language\": \"" << config.language << "\",\n";
@@ -267,6 +278,18 @@ inline bool JSONToConfig(const std::string& json, AppConfig& config) {
         }
     }
 
+    // Parse player indicator LED setting (default on preserves the original behaviour)
+    config.ledConfig.enabled = true;
+    auto ledPos = json.find("\"playerLEDs\"");
+    if (ledPos != std::string::npos) {
+        auto ledStart = json.find('{', ledPos);
+        auto ledEnd = json.find('}', ledStart);
+        if (ledStart != std::string::npos && ledEnd != std::string::npos) {
+            std::string ledStr = json.substr(ledStart, ledEnd - ledStart + 1);
+            config.ledConfig.enabled = ExtractJsonBool(ledStr, "enabled", true);
+        }
+    }
+
     // Parse gyro sensitivity (default 1.0 preserves the original raw values)
     config.gyroSensitivity = (float)ExtractJsonNumber(json, "gyroSensitivity", 1.0);
     if (config.gyroSensitivity <= 0.0f || config.gyroSensitivity > 8.0f)
@@ -280,8 +303,8 @@ inline bool JSONToConfig(const std::string& json, AppConfig& config) {
     // Parse minimizeToTray
     config.minimizeToTray = ExtractJsonBool(json, "minimizeToTray", false);
 
-    // Parse autoCheckUpdate
-    config.autoCheckUpdate = ExtractJsonBool(json, "autoCheckUpdate", true);
+    // Parse autoCheckUpdate (default off)
+    config.autoCheckUpdate = ExtractJsonBool(json, "autoCheckUpdate", false);
 
     // Parse suppressXboxWarning
     config.suppressXboxWarning = ExtractJsonBool(json, "suppressXboxWarning", false);

@@ -142,6 +142,9 @@
     "settings_minimize_to_tray": "Minimize to tray on close",
     "settings_minimize_to_tray_hint": "Minimize to system tray instead of exiting when closing the window",
 
+    "settings_player_leds": "Player Indicator LEDs",
+    "settings_player_leds_hint": "Turn off to keep all four player LEDs dark, including when switching mouse modes. Applies to connected controllers immediately.",
+
     "settings_auto_check_update": "Auto check for updates on startup",
     "settings_auto_check_update_hint": "Automatically check for new versions when the program starts",
     "settings_check_update": "Check for Updates",
